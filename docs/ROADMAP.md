@@ -130,14 +130,25 @@ In-progress milestone. Order of attack:
 
 ## v0.5 — Streaming, observability, hardening
 
-- [ ] Server-side streaming via SRF (`SETOF text`) where the provider
-      supports it.
-- [ ] Real SQL parser for `sql_guard` (replace token matcher).
-- [ ] Audit hooks for SQL the agent runs (post-execution).
+- [x] Server-side streaming via SRF (`SETOF text`) — `pg_ask.ask_stream(question)`.
+      Yields `[thinking]`, `[tool]`, and `[answer]` rows so the client can
+      `FETCH 1` repeatedly instead of blocking for the full loop.
+- [x] Real SQL parser for `sql_guard` — `sqlparser` 0.62 with PostgreSQL dialect
+      now classifies statement types (SELECT, WITH, EXPLAIN, COPY, INSERT, …).
+      The token-based lexer is kept as fallback for non-standard syntax and
+      for the function-denylist check.
+- [x] Audit hooks for SQL the agent runs — `pg_ask._sql_audit` table.
+      `sql_query` and `sample_table` tools write a row post-execution with
+      the query text, rendered row count, readonly flag, and tool name.
 - [ ] Real Claude / GPT / Gemini integration tests against recorded fixtures.
-- [ ] Background-worker prototype for long-running questions (decouples
-      LLM latency from the calling backend).
-- [ ] Upgrade-script policy documented; `pg_ask--0.4--0.5.sql` ships.
+      Stub deferred; the `Provider` trait + `build()` factory are ready for a
+      `fixture` alias that replays JSON files from `tests/fixtures/`.
+- [x] Background-worker prototype — `pg_ask worker` registered via
+      `BackgroundWorkerBuilder` when loaded through `shared_preload_libraries`.
+      v0.5 stub heartbeat only; v0.6 will poll `pg_ask._jobs` and run the
+      agent loop asynchronously.
+- [x] Upgrade-script policy documented; `sql/pg_ask--0.4--0.5.sql` ships.
+      New `_sql_audit` table, `_tools.updated_at` backfill, grant re-apply.
 
 ## Non-goals (for now)
 

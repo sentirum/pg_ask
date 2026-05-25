@@ -147,12 +147,30 @@ CREATE TABLE IF NOT EXISTS pg_ask._tools (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- SQL audit log. One row per sql_query / sample_table execution.
+-- Written directly by the tool so operators can trace exactly what
+-- the model asked the database to do, when, and with what result.
+CREATE TABLE IF NOT EXISTS pg_ask._sql_audit (
+    id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    ts         timestamptz NOT NULL DEFAULT now(),
+    caller     name        NOT NULL DEFAULT current_user,
+    db         name        NOT NULL DEFAULT current_database(),
+    query      text        NOT NULL,
+    row_count  int,
+    error      text,
+    readonly   bool        NOT NULL,
+    tool_name  text        NOT NULL
+);
+CREATE INDEX IF NOT EXISTS _sql_audit_ts_idx     ON pg_ask._sql_audit (ts DESC);
+CREATE INDEX IF NOT EXISTS _sql_audit_caller_idx ON pg_ask._sql_audit (caller, ts DESC);
+
 -- Lock down internals by default. Users get the public-facing functions via
 -- explicit GRANT in their setup script. _traces stays readable so operators
 -- can audit without extra grants; the writer above is the only INSERT path.
 REVOKE ALL ON ALL TABLES IN SCHEMA pg_ask FROM PUBLIC;
-GRANT  SELECT  ON pg_ask._traces TO PUBLIC;
-GRANT  SELECT  ON pg_ask._tools   TO PUBLIC;
+GRANT  SELECT  ON pg_ask._traces     TO PUBLIC;
+GRANT  SELECT  ON pg_ask._tools      TO PUBLIC;
+GRANT  SELECT  ON pg_ask._sql_audit  TO PUBLIC;
 REVOKE ALL ON FUNCTION pg_ask._write_trace(jsonb) FROM PUBLIC;
 GRANT  EXECUTE ON FUNCTION pg_ask._write_trace(jsonb) TO PUBLIC;
 
@@ -168,5 +186,7 @@ BEGIN
     END IF;
     -- _tools needs INSERT/DELETE for register/unregister on behalf of caller.
     EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON pg_ask._tools TO PUBLIC';
+    -- _sql_audit needs INSERT from the tools.
+    EXECUTE 'GRANT SELECT, INSERT ON pg_ask._sql_audit TO PUBLIC';
 END
 $reapply_grants$;

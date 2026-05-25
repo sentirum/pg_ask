@@ -8,7 +8,9 @@
 mod dispatch;
 mod prompt;
 mod run;
+pub mod stream;
 
 pub use run::{run, run_with_history, AgentMode};
 #[allow(unused_imports)] // consumed by telemetry writer once it lands
 pub use run::AgentOutcome;
+pub use stream::run_stream;

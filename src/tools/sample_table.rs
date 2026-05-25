@@ -168,6 +168,15 @@ fn run_sample(
             rows.push(cells);
         }
 
+        // Audit hook
+        let row_count = rows.len() as i32;
+        let _ = client.update(
+            "INSERT INTO pg_ask._sql_audit (query, row_count, readonly, tool_name) \
+             VALUES ($1, $2, $3, 'sample_table')",
+            None,
+            &[query.into(), row_count.into(), readonly.into()],
+        );
+
         Ok(render_table(&col_names, &rows))
     })
 }

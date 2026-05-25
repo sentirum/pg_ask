@@ -4,10 +4,11 @@
 //! Belt-and-braces over `transaction_read_only` — the guard is one layer,
 //! the readonly transaction is another, RLS/GRANTs are the primary defence.
 //!
-//! Strategy: a small token-aware lexer + a handful of rule checks. We avoid
-//! a full SQL parser for v0.1 because pulling one in is heavy and the
-//! benefit over carefully chosen rules is marginal. A real parser (and
-//! deeper analyses like column allow/deny) is v0.5 work.
+//! v0.5 upgrade: statement-type classification now uses a real SQL parser
+//! (`sqlparser` with PostgreSQL dialect). The token-based lexer is kept
+//! as a fallback when the parser chokes on non-standard Postgres syntax,
+//! and for the function-denylist check (which needs to distinguish
+//! function names from string literals and identifiers).
 
 mod lexer;
 mod rules;
@@ -47,13 +48,85 @@ pub fn validate(sql: &str, mode: GuardMode) -> Result<ValidatedSql<'_>> {
         return Err(AskError::GuardRejected("empty statement".into()));
     }
 
+    // v0.5: try real parser first for statement-type classification.
+    let parsed_ok = if let Ok(stmts) = parse_ast(trimmed) {
+        ast_checks(&stmts, mode).is_ok()
+    } else {
+        false
+    };
+
     let tokens = lexer::tokenize(trimmed);
 
-    rules::single_statement(&tokens)?;
-    rules::starts_with_allowed_verb(&tokens, mode)?;
+    if !parsed_ok {
+        // Parser couldn't classify the statement — fall back to the lexer.
+        rules::single_statement(&tokens)?;
+        rules::starts_with_allowed_verb(&tokens, mode)?;
+    }
+
+    // Function denylist is always checked via the token stream so we
+    // correctly ignore banned names inside string literals.
     rules::no_banned_functions(&tokens)?;
 
     Ok(ValidatedSql { sql: trimmed })
+}
+
+// ---------- v0.5 real parser ----------
+
+fn parse_ast(sql: &str) -> std::result::Result<Vec<sqlparser::ast::Statement>, sqlparser::parser::ParserError> {
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
+    let dialect = PostgreSqlDialect {};
+    Parser::parse_sql(&dialect, sql)
+}
+
+fn ast_checks(stmts: &[sqlparser::ast::Statement], mode: GuardMode) -> Result<()> {
+    if stmts.len() != 1 {
+        return Err(AskError::GuardRejected(
+            "only one statement allowed".into(),
+        ));
+    }
+    use sqlparser::ast::Statement;
+    match &stmts[0] {
+        // Read-only shapes
+        Statement::Query(_) => Ok(()),
+        Statement::Explain { .. } => Ok(()),
+        Statement::Copy { .. } => Err(AskError::GuardRejected(
+            "COPY is not allowed".into(),
+        )),
+        // Write shapes — permitted only in writable mode
+        Statement::Insert(_)
+        | Statement::Update { .. }
+        | Statement::Delete(_) => {
+            if mode == GuardMode::Readonly {
+                Err(AskError::GuardRejected(
+                    "write statements are not allowed in readonly mode".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        // DDL — always rejected (even in writable mode the operator should
+        // run DDL themselves, not via the model).
+        Statement::CreateTable(_)
+        | Statement::CreateView(_)
+        | Statement::CreateIndex(_)
+        | Statement::Drop { .. }
+        | Statement::AlterTable(_)
+        | Statement::Truncate { .. }
+        | Statement::CreateSchema { .. }
+        | Statement::CreateSequence { .. }
+        | Statement::CreateExtension { .. } => Err(AskError::GuardRejected(
+            "DDL statements are not allowed".into(),
+        )),
+        // Everything else is blocked by default.
+        other => {
+            let kind = format!("{other:?}");
+            let short = kind.split('(').next().unwrap_or(&kind);
+            Err(AskError::GuardRejected(format!(
+                "statement type `{short}` is not allowed"
+            )))
+        }
+    }
 }
 
 #[cfg(test)]

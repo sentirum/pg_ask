@@ -29,6 +29,7 @@ use pgrx::prelude::*;
 
 mod agent;
 mod api;
+mod bgworker;
 mod embeddings;
 mod infra;
 mod memory;
@@ -178,6 +179,9 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Userset,
         GucFlags::default(),
     );
+
+    // ---------- Background worker (v0.5) ----------
+    bgworker::register();
 
     // ---------- Memory / embedding (v0.3) ----------
     GucRegistry::define_string_guc(

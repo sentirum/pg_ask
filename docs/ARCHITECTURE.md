@@ -81,6 +81,7 @@ src/
     loop.rs                  # run_agent(...)
     prompt.rs                # build_system_prompt(...)
     dispatch.rs              # dispatch_tool(...)
+    stream.rs                # ask_stream stateful iterator (v0.5)
   providers/
     mod.rs                   # Provider trait + ProviderResponse + factory
     anthropic.rs             # Anthropic Messages API
@@ -105,8 +106,10 @@ src/
     store.rs                 # SPI primitives; hybrid_search SQL
   sql_guard/
     mod.rs                   # validate(sql, mode) -> Result<ValidatedSql>
-    lexer.rs                 # tokenization
+    lexer.rs                 # tokenization (fallback + denylist)
     rules.rs                 # SELECT-only, deny-list, multi-statement check
+    # v0.5: sqlparser (PostgreSQL dialect) handles statement-type
+    # classification; lexer kept for non-standard syntax and function denylist.
   schema/
     mod.rs                   # summarize_within(budget) -> (text, mode)
     introspect.rs            # pg_catalog queries (full / per-table / table comments)
@@ -114,6 +117,7 @@ src/
   session/
     mod.rs                   # create / load_history / append / clear
     store.rs                 # SPI primitives (parameterised; owner check)
+  bgworker.rs                # BackgroundWorker prototype (v0.5)
   telemetry/
     mod.rs                   # TraceRecord + writer; no-op if _traces missing
   infra/
@@ -123,7 +127,8 @@ src/
     errors.rs                # AskError + From impls
     spi.rs                   # tiny SPI helpers (single_text, exec_unit, ...)
 sql/
-  bootstrap.sql              # schemas, _config, _sessions, _messages, _traces
+  bootstrap.sql              # schemas, _config, _sessions, _messages, _traces, _tools, _sql_audit
+  pg_ask--0.4--0.5.sql       # upgrade script (v0.5)
 docs/
   ARCHITECTURE.md
   SECURITY.md

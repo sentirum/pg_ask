@@ -12,6 +12,26 @@ use crate::api::trace::with_trace;
 use crate::telemetry::TraceKind;
 use pgrx::prelude::*;
 
+/// Streaming version of `pg_ask.ask`. Returns a set-of-text where each
+/// row is one event in the agent loop (thinking, tool result, final answer).
+/// The caller can `FETCH 1` repeatedly to see progress instead of waiting
+/// for the entire loop to finish.
+#[pg_extern(schema = "pg_ask", volatile, parallel_unsafe)]
+fn ask_stream(question: &str) -> SetOfIterator<'static, String> {
+    let result = with_trace(TraceKind::Ask, question, |rec| {
+        let lines = agent::run_stream(question, AgentMode::Execute)?;
+        // Record the final line (if present) as the trace answer.
+        if let Some(last) = lines.last() {
+            rec.final_text = Some(last.clone());
+        }
+        Ok(lines)
+    });
+    match result {
+        Ok(lines) => SetOfIterator::new(lines.into_iter()),
+        Err(e) => SetOfIterator::once(format!("[error] {e}")),
+    }
+}
+
 /// Ask the database a natural-language question. The agent reads the schema,
 /// plans SQL, executes it via SPI in the current transaction, and synthesises
 /// a textual answer.

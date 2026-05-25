@@ -19,11 +19,13 @@ SELECT pg_ask.sql('top 5 customers by lifetime revenue');
 -- FROM orders GROUP BY customer_id ORDER BY revenue DESC LIMIT 5;
 ```
 
-> **Status:** v0.4 complete — Anthropic + OpenAI + Gemini chat,
+> **Status:** v0.5 complete — Anthropic + OpenAI + Gemini chat,
 > OpenAI / Voyage / Gemini embeddings, pgvector-backed long-term memory
 > (hybrid cosine + BM25-style ranking), multi-turn sessions, audit log,
 > agent loop, readonly SQL tool, HTTP fetch (allow-list gated), sample
-> table tool, user-defined tools, RLS-aware schema dump, column redaction.
+> table tool, user-defined tools, RLS-aware schema dump, column redaction,
+> streaming SRF (`ask_stream`), real SQL parser for `sql_guard`,
+> background-worker prototype.
 
 ## Why
 

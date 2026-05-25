@@ -1,5 +1,5 @@
 comment = 'Agent-driven natural language interface for PostgreSQL'
-default_version = '0.1.0'
+default_version = '0.5.0'
 module_pathname = '$libdir/pg_ask'
 relocatable = false
 superuser = false

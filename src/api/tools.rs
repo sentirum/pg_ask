@@ -13,7 +13,6 @@
 
 use crate::infra::errors::AskError;
 use pgrx::prelude::*;
-use pgrx::Uuid;
 
 /// Register a new user-defined tool. The body may contain `{{key}}`
 /// placeholders that are replaced from jsonb arguments at invocation time.
