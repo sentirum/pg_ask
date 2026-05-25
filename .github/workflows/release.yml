@@ -74,15 +74,20 @@ jobs:
             https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          # Only the dev headers + pg_config; we don't run the
-          # server here. v0.5.3 dropped libssl-dev (ureq 3 = rustls).
+          # Need the full postgresql-18 package because it ships
+          # the runtime tree (/usr/share/postgresql/18/extension,
+          # /usr/lib/postgresql/18/lib) that pgrx install writes
+          # into. Headers alone don't create those dirs. v0.5.3
+          # dropped libssl-dev (ureq 3 = rustls).
           sudo apt-get install -y \
-            postgresql-server-dev-18 \
+            postgresql-18 postgresql-server-dev-18 \
             libclang-dev clang pkg-config
-          # Make the system extension dir writable by the runner
-          # user so `cargo pgrx install` can drop pg_ask.control /
-          # pg_ask--*.sql / pg_ask.so into it without sudo. The
-          # runner is throwaway so opening these dirs is harmless.
+          # Stop the system cluster; we don't need it for a build
+          # and leaving it running can race with chown.
+          sudo systemctl stop postgresql || true
+          # Make the system extension + lib dirs writable so
+          # `cargo pgrx install` can drop pg_ask.{control,sql,so}
+          # into them without sudo. Throwaway runner makes this safe.
           sudo chown -R "$USER" \
             /usr/share/postgresql/18/extension \
             /usr/lib/postgresql/18/lib
