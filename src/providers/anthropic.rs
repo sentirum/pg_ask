@@ -1,19 +1,24 @@
 //! Anthropic Messages API provider.
 //!
 //! Spec: <https://docs.anthropic.com/en/api/messages>
+//!
+//! All HTTP goes through the shared [`HttpClient`] so timeouts are enforced
+//! centrally; this module owns only the wire-format translation.
 
-use super::{Message, MessageContent, Provider, ProviderResponse, Role, ToolCall, ToolSpec};
-use crate::config;
-use crate::error::{AskError, Result};
-use serde::{Deserialize, Serialize};
+use super::wire::{Message, MessageContent, ProviderResponse, Role, ToolCall, ToolSpec};
+use super::Provider;
+use crate::infra::config::RuntimeConfig;
+use crate::infra::errors::{AskError, Result};
+use crate::infra::http::HttpClient;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-5";
-const DEFAULT_MAX_TOKENS: u32 = 4096;
 const API_VERSION: &str = "2023-06-01";
 
 pub struct AnthropicProvider {
+    http: HttpClient,
     api_key: String,
     model: String,
     base_url: String,
@@ -21,15 +26,17 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    pub fn from_config() -> Result<Self> {
-        Ok(Self {
-            api_key: config::require("api_key")?,
-            model: config::optional("model").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            base_url: config::optional("base_url").unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
-            max_tokens: config::optional("max_tokens")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_MAX_TOKENS),
-        })
+    pub fn new(cfg: &RuntimeConfig, http: HttpClient) -> Self {
+        Self {
+            http,
+            api_key: cfg.api_key.clone(),
+            model: cfg.model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            base_url: cfg
+                .base_url
+                .clone()
+                .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            max_tokens: cfg.max_tokens,
+        }
     }
 }
 
@@ -41,27 +48,13 @@ impl Provider for AnthropicProvider {
         tools: &[ToolSpec],
     ) -> Result<ProviderResponse> {
         let body = build_request(&self.model, self.max_tokens, system, history, tools);
-
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
-        let resp = ureq::post(&url)
-            .set("x-api-key", &self.api_key)
-            .set("anthropic-version", API_VERSION)
-            .set("content-type", "application/json")
-            .send_json(body);
+        let headers: [(&str, &str); 2] = [
+            ("x-api-key", self.api_key.as_str()),
+            ("anthropic-version", API_VERSION),
+        ];
 
-        let resp = match resp {
-            Ok(r) => r,
-            Err(ureq::Error::Status(status, r)) => {
-                let body = r.into_string().unwrap_or_default();
-                return Err(AskError::ProviderHttp { status, body });
-            }
-            Err(e) => return Err(AskError::Transport(e.to_string())),
-        };
-
-        let parsed: MessagesResponse = resp
-            .into_json()
-            .map_err(|e| AskError::Transport(e.to_string()))?;
-
+        let parsed: MessagesResponse = self.http.post_json(&url, &headers, &body)?;
         parse_response(parsed)
     }
 }
@@ -166,9 +159,6 @@ enum ContentBlock {
     #[serde(other)]
     Other,
 }
-
-#[derive(Debug, Serialize)]
-struct _Unused; // placate dead_code; kept for future content block kinds
 
 fn parse_response(resp: MessagesResponse) -> Result<ProviderResponse> {
     let mut text_parts: Vec<String> = Vec::new();

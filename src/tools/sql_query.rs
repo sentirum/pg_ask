@@ -1,17 +1,30 @@
-//! `sql_query` tool — executes a SELECT and returns a compact textual table
-//! the model can reason over. Runs via SPI in the caller's transaction.
+//! `sql_query` tool — the single way the model gets to touch the database.
+//!
+//! Layers of defence around the SPI call (top-to-bottom):
+//!
+//! 1. `sql_guard::validate` rejects writes, multi-statements, banned funcs.
+//! 2. `SET LOCAL statement_timeout` bounds each tool invocation.
+//! 3. `SET LOCAL transaction_read_only = on` when readonly mode is set —
+//!    enforced by Postgres itself, not by our string match.
+//! 4. Row + cell caps before the model sees the data.
+//!
+//! Errors flow back to the model as `is_error = true` tool outputs so it
+//! can self-correct (typos, wrong column names, etc.) instead of aborting
+//! the entire `ask()` invocation.
 
 use super::{Tool, ToolOutput};
-use crate::error::{AskError, Result};
+use crate::infra::errors::{AskError, Result};
 use crate::providers::ToolSpec;
+use crate::sql_guard::{self, GuardMode};
 use pgrx::prelude::*;
 use serde_json::json;
 
-const MAX_ROWS: usize = 200;
 const MAX_CELL_CHARS: usize = 500;
 
 pub struct SqlQueryTool {
     pub readonly: bool,
+    pub max_rows: usize,
+    pub statement_timeout_ms: u64,
 }
 
 impl Tool for SqlQueryTool {
@@ -35,36 +48,33 @@ impl Tool for SqlQueryTool {
     }
 
     fn invoke(&self, args: &serde_json::Value) -> Result<ToolOutput> {
-        let query = args
+        let raw = args
             .get("query")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AskError::Tool {
                 name: "sql_query".into(),
                 message: "missing required argument `query`".into(),
-            })?
-            .trim();
+            })?;
 
-        if query.is_empty() {
-            return Ok(err("empty query"));
-        }
+        let mode = if self.readonly {
+            GuardMode::Readonly
+        } else {
+            GuardMode::Writable
+        };
 
-        if self.readonly && !is_pure_select(query) {
-            return Ok(err(
-                "readonly mode is enabled; only single SELECT/WITH/EXPLAIN statements are allowed",
-            ));
-        }
+        let validated = match sql_guard::validate(raw, mode) {
+            Ok(v) => v,
+            Err(e) => return Ok(err(&e.to_string())),
+        };
 
-        // SPI runs synchronously in the caller's transaction. Errors caught by
-        // pgrx surface as Rust Result; we convert them to model-visible text so
-        // the agent can recover (e.g. fix a typo and retry) instead of aborting.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_query_to_text(query)
-        }));
-
-        match result {
-            Ok(Ok(table)) => Ok(ok(table)),
-            Ok(Err(e)) => Ok(err(&format!("query failed: {e}"))),
-            Err(_) => Ok(err("query aborted (panic in SPI)")),
+        match run_query_to_text(
+            validated.as_str(),
+            self.readonly,
+            self.max_rows,
+            self.statement_timeout_ms,
+        ) {
+            Ok(table) => Ok(ok(table)),
+            Err(e) => Ok(err(&format!("query failed: {e}"))),
         }
     }
 }
@@ -83,32 +93,39 @@ fn err(msg: &str) -> ToolOutput {
     }
 }
 
-/// Lightweight gate: lower-cased trimmed statement must start with SELECT/WITH/EXPLAIN
-/// and must not contain a `;` followed by more tokens. This is *defence in depth*
-/// over the readonly transaction we should also be wrapping around the call.
-fn is_pure_select(query: &str) -> bool {
-    let lower = query.trim_start().to_ascii_lowercase();
-    let starts_ok = lower.starts_with("select ")
-        || lower.starts_with("with ")
-        || lower.starts_with("explain ")
-        || lower.starts_with("table ");
-    if !starts_ok {
-        return false;
-    }
-    // Reject multi-statement payloads.
-    let trimmed = query.trim_end().trim_end_matches(';');
-    !trimmed.contains(';')
-}
+/// Execute `query` under timeouts + readonly + row cap, render as a text
+/// table. We do **not** wrap this in `catch_unwind` — pgrx already converts
+/// Postgres longjmp errors into Rust panics that propagate as `Result::Err`
+/// through `SpiResult`, and wrapping `catch_unwind` over a SPI boundary
+/// risks leaving Postgres' error stack in an inconsistent state.
+fn run_query_to_text(
+    query: &str,
+    readonly: bool,
+    max_rows: usize,
+    statement_timeout_ms: u64,
+) -> std::result::Result<String, String> {
+    let timeout_sql = format!("SET LOCAL statement_timeout = {statement_timeout_ms}");
+    let readonly_sql = "SET LOCAL transaction_read_only = on";
 
-/// Execute `query` via SPI and render the result as a simple text table.
-///
-/// We keep this deliberately format-agnostic — the model is good at reading
-/// space-aligned columns. Truncate at MAX_ROWS / MAX_CELL_CHARS to keep
-/// context bounded.
-fn run_query_to_text(query: &str) -> std::result::Result<String, String> {
-    Spi::connect(|client| -> std::result::Result<String, String> {
+    Spi::connect_mut(|client| -> std::result::Result<String, String> {
+        // GUC scope: SET LOCAL is automatically rolled back at end of the
+        // outer transaction. Inside the same transaction these stay in
+        // effect for every subsequent statement, including the user's
+        // remaining work — that's why we restore them in the cleanup at the
+        // bottom. (Worth noting: in the typical pg_ask.ask() call the only
+        // statement that runs *after* ours is the tool result feed-back,
+        // which doesn't hit SPI again, so restoring is belt-and-braces.)
+        client
+            .update(timeout_sql.as_str(), None, &[])
+            .map_err(|e| e.to_string())?;
+        if readonly {
+            client
+                .update(readonly_sql, None, &[])
+                .map_err(|e| e.to_string())?;
+        }
+
         let tuptable = client
-            .select(query, None, None)
+            .select(query, None, &[])
             .map_err(|e| e.to_string())?;
 
         let columns = tuptable.columns().map_err(|e| e.to_string())?;
@@ -124,7 +141,7 @@ fn run_query_to_text(query: &str) -> std::result::Result<String, String> {
         let mut truncated = false;
 
         for (idx, row) in tuptable.into_iter().enumerate() {
-            if idx >= MAX_ROWS {
+            if idx >= max_rows {
                 truncated = true;
                 break;
             }
@@ -140,9 +157,8 @@ fn run_query_to_text(query: &str) -> std::result::Result<String, String> {
             rows.push(cells);
         }
 
-        Ok(render_table(&col_names, &rows, truncated))
+        Ok(render_table(&col_names, &rows, truncated, max_rows))
     })
-    .map_err(|e| e.to_string())?
 }
 
 fn truncate_cell(s: &str) -> String {
@@ -154,7 +170,7 @@ fn truncate_cell(s: &str) -> String {
     }
 }
 
-fn render_table(cols: &[String], rows: &[Vec<String>], truncated: bool) -> String {
+fn render_table(cols: &[String], rows: &[Vec<String>], truncated: bool, cap: usize) -> String {
     if rows.is_empty() {
         return format!("(0 rows)\ncolumns: {}", cols.join(", "));
     }
@@ -179,7 +195,7 @@ fn render_table(cols: &[String], rows: &[Vec<String>], truncated: bool) -> Strin
     }
     out.push_str(&format!("\n({} rows)", rows.len()));
     if truncated {
-        out.push_str(&format!(" — truncated at {MAX_ROWS}"));
+        out.push_str(&format!(" — truncated at {cap}"));
     }
     out
 }

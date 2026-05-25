@@ -64,6 +64,17 @@ cargo pgrx init                      # downloads + builds PG dev envs
 cargo pgrx run pg18                  # spawns a psql shell against a temp PG18
 ```
 
+> **macOS PG18 note:** `cargo pgrx init --pg18 download` fails on Homebrew
+> systems unless ICU is on `PKG_CONFIG_PATH`. Run once:
+>
+> ```bash
+> brew install icu4c
+> export PKG_CONFIG_PATH="$(brew --prefix icu4c)/lib/pkgconfig"
+> cargo pgrx init --pg18 download
+> ```
+>
+> On Linux, `apt install libicu-dev` (or distro equivalent) is enough.
+
 Then in the psql shell:
 
 ```sql
@@ -95,9 +106,13 @@ For multi-tenant or untrusted-caller scenarios, run with `readonly = true`
 and gate `pg_ask.ask` behind a `SECURITY DEFINER` wrapper that pins the
 search path and any RLS context you need.
 
-## Roadmap
+## Docs
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — module layout, layering
+  rules, request lifecycle, trait contracts.
+- [`docs/SECURITY.md`](docs/SECURITY.md) — threat model, defence layers,
+  production hardening checklist.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone plan, v0.1 → v0.5.
 
 ## License
 
