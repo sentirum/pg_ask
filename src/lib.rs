@@ -343,6 +343,52 @@ mod tests {
         );
     }
 
+    /// H2 (v0.5.2 review) regression: a sql_query that ERRORs at
+    /// the Postgres layer (typo, missing column, divide-by-zero,
+    /// statement_timeout, ...) must NOT poison the outer ask()
+    /// transaction. Before the subtxn wrapper, the next SPI call
+    /// in the agent loop would fail with "current transaction is
+    /// aborted, commands ignored" and the entire ask() call would
+    /// crash. After the fix, the failure is contained: the tool
+    /// returns is_error=true to the model, audit row carries the
+    /// errmsg, and subsequent statements (including the final
+    /// SELECT we make here) keep working.
+    ///
+    /// We trigger the failure by aiming sql_query at a relation
+    /// that doesn't exist. The fixture replays a sql_query call
+    /// followed by a final text turn; the assertion verifies the
+    /// final turn was actually emitted (it cannot be if the txn
+    /// was poisoned by the failed query).
+    #[pg_test]
+    fn sql_query_failure_does_not_poison_outer_transaction() {
+        use_fixture("sql_query_targets_missing_table");
+
+        let answer: Option<String> =
+            Spi::get_one("SELECT ask.ask('show me the missing table')").unwrap();
+
+        // The fixture's final turn is "recovered after error";
+        // we only get here if the subtxn-isolated failure didn't
+        // poison the outer ask() transaction.
+        assert!(
+            answer
+                .as_deref()
+                .map(|s| s.to_lowercase().contains("recovered"))
+                .unwrap_or(false),
+            "agent loop should have recovered from sql_query failure, got: {answer:?}"
+        );
+
+        // And the outer transaction must still be usable for
+        // arbitrary SQL after ask() returned — prove it by
+        // hitting pg_class.
+        // pg_class.relname is `name`, not `text`, so cast to keep
+        // pgrx's typed Datum extraction happy.
+        let relname: Option<String> = Spi::get_one(
+            "SELECT relname::text FROM pg_class WHERE relname = 'pg_class' LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(relname.as_deref(), Some("pg_class"));
+    }
+
     /// sql_guard must reject a model-emitted DROP, *through SPI*, not
     /// just in the standalone unit tests. We script the agent to emit
     /// `DROP TABLE pg_class`, then check the audit row records the

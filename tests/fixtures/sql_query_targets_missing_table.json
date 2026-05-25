@@ -1,0 +1,17 @@
+[
+  {
+    "text": "Let me try the table you mentioned.",
+    "tool_calls": [
+      {
+        "id": "call_missing",
+        "name": "sql_query",
+        "arguments": {
+          "query": "SELECT 1 FROM ask_no_such_table_xyz"
+        }
+      }
+    ]
+  },
+  {
+    "final": "I recovered after error — the table doesn't exist."
+  }
+]

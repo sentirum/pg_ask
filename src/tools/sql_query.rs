@@ -124,14 +124,29 @@ fn err(msg: &str) -> ToolOutput {
 }
 
 /// Execute `query` under timeouts + readonly + row cap, render as a text
-/// table. We do **not** wrap this in `catch_unwind` — pgrx already converts
-/// Postgres longjmp errors into Rust panics that propagate as `Result::Err`
-/// through `SpiResult`, and wrapping `catch_unwind` over a SPI boundary
-/// risks leaving Postgres' error stack in an inconsistent state.
+/// table.
 ///
-/// Datum extraction is delegated to `super::render::run_to_table` which
-/// wraps the query in `row_to_json(...)::text` to get native PG → text
-/// conversion for every column type. See that module's docs for why.
+/// ## H2 (v0.5.2 review): subtransaction isolation
+///
+/// The user query runs inside an internal subtransaction (see
+/// `src/infra/subtxn.rs`). If it ERRORs — typo, missing column,
+/// permission denied, divide-by-zero, statement_timeout, anything —
+/// the subtxn is rolled back and the outer `ask()` transaction stays
+/// usable. Before this wrapper, a single failed model-emitted query
+/// would poison the rest of the agent loop with "current transaction
+/// is aborted, commands ignored" on every subsequent SPI call,
+/// including audit_finish and the next tool invocation.
+///
+/// The subtxn does NOT relax `transaction_read_only` — Postgres
+/// rejects that mid-transaction even from inside a subtxn (the flag
+/// is transaction-wide, not subtxn-scoped). Readonly enforcement is
+/// still done via the parent's `SET LOCAL transaction_read_only =
+/// on` set up in `audit_begin`.
+///
+/// Datum extraction is delegated to `super::render::run_to_table`
+/// which wraps the query in `row_to_json(...)::text` to get native
+/// PG → text conversion for every column type. See that module's
+/// docs for why.
 fn run_query_to_text(
     query: &str,
     readonly: bool,
@@ -145,16 +160,31 @@ fn run_query_to_text(
     // same row with the post-query stats.
     let audit_id = audit_begin(query, readonly, statement_timeout_ms)?;
 
-    // Phase 2: the actual query.
+    // Phase 2: the actual query, wrapped in a subtxn so any ERROR
+    // stays contained. The closure must be `UnwindSafe`; `&str` and
+    // `&[String]` already are, and we move `sensitive`'s slice via
+    // a fresh borrow inside the closure.
     let started = Instant::now();
-    let result = render::run_to_table(query, max_rows, sensitive);
+    let sensitive_clone: Vec<String> = sensitive.to_vec();
+    let query_owned = query.to_string();
+    let max_rows_copy = max_rows;
+    let subtxn_result = crate::infra::subtxn::run_in_subtransaction(
+        Some("pg_ask_sql_query"),
+        move || {
+            render::run_to_table(&query_owned, max_rows_copy, &sensitive_clone)
+                .map_err(crate::infra::errors::AskError::Sql)
+        },
+    );
+    // Flatten AskError -> String so the rest of the function (audit
+    // + caller) keeps the same shape as before.
+    let result: std::result::Result<RenderedTable, String> =
+        subtxn_result.map_err(|e| e.to_string());
     let latency_ms = started.elapsed().as_millis() as i64;
 
-    // Phase 3: re-enable writes (RESET LOCAL undoes the SET LOCAL from
-    // phase 1 within the current transaction) and update the audit row.
-    // We do this for both success and failure so the operator can see
-    // why a query failed without grepping logs. Failures here are not
-    // fatal to the user's call (audit is best-effort).
+    // Phase 3: update the audit row with the outcome. Best-effort;
+    // failures are logged via `warning!()` but never propagated.
+    // Readonly mode skips the update entirely — see audit_finish for
+    // the unresolved-limitation note (H3 in the v0.5.2 review).
     audit_finish(audit_id, readonly, latency_ms, result.as_ref().err());
 
     result.map(|RenderedTable { text, .. }| text)
@@ -214,18 +244,32 @@ fn audit_finish(
         // will simply stay at row_count = -1.
         return;
     };
+    // H3 (v0.5.2 review) — unresolved limitation:
+    //
+    // We tried wrapping this UPDATE in an internal subtransaction so
+    // we could `SET LOCAL transaction_read_only = off` inside the
+    // subtxn (see src/infra/subtxn.rs for the wrapper, kept for the
+    // H2 isolation use case below). It does not work: `XactReadOnly`
+    // is a transaction-wide flag that subtransactions inherit, and
+    // `check_transaction_read_only` in guc.c specifically rejects
+    // flipping it back off inside a subtxn ("cannot set transaction
+    // read-write mode inside a read-only transaction",
+    // ERRCODE_ACTIVE_SQL_TRANSACTION).
+    //
+    // The remaining clean options are:
+    //   * dblink back to the same DB (extra dependency + network
+    //     handshake per audit row — too costly for a hot agent loop),
+    //   * a background worker that drains an audit queue
+    //     (heavyweight, separate process model),
+    //   * an autonomous-transaction extension (not in core).
+    //
+    // Until one of those lands, readonly-mode audit rows stay at
+    // row_count = -1 ("in flight"). This is documented in the
+    // ask._sql_audit table comment as the readonly-mode tombstone.
     if readonly {
-        // In readonly mode the surrounding transaction has
-        // `transaction_read_only = on` and Postgres refuses to undo
-        // that mid-transaction ("must be set before any query"). Per-
-        // function SET clauses are subject to the same restriction
-        // (`cannot be set locally in functions`). The only known fix
-        // is a real subtransaction via pgrx FFI, which we deliberately
-        // avoid in this crate (`no unsafe`). Audit row stays at
-        // row_count = -1 ("in flight / unknown"), which is documented
-        // as the readonly-mode tombstone in ask._sql_audit.
         return;
     }
+    let error_owned = error.cloned();
     let r: std::result::Result<(), String> = Spi::connect_mut(|client| {
         // Route through a SECURITY DEFINER helper so we don't need
         // PUBLIC to hold UPDATE on _sql_audit (C3 grant policy).
@@ -236,7 +280,7 @@ fn audit_finish(
                 &[
                     id.into(),
                     latency_ms.into(),
-                    error.cloned().as_deref().into(),
+                    error_owned.as_deref().into(),
                 ],
             )
             .map_err(|e| e.to_string())?;
