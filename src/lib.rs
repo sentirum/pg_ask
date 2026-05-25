@@ -457,6 +457,59 @@ mod tests {
         assert_eq!(sql.as_deref(), Some("SELECT count(*) FROM pg_class"));
     }
 
+    /// Regression for the v0.5.2 "readonly GUCs leak past the SPI
+    /// block" bug found by manual smoke against DeepInfra. The
+    /// failure mode was: `ask.ask()` in readonly mode (the default)
+    /// errored with `25006 cannot execute INSERT in a read-only
+    /// transaction` as soon as `telemetry::write` tried to land the
+    /// trace row. Root cause: `sql_query::audit_begin` /
+    /// `sample_table::run_sample` / `planner::explain::run` each
+    /// issued `SET LOCAL transaction_read_only = on`, which is
+    /// scoped to the whole enclosing transaction, not to the
+    /// `Spi::connect_mut` block. The fix moves those GUCs inside
+    /// the subtxn that already wraps the user query so the flag
+    /// auto-reverts on subtxn release.
+    ///
+    /// We assert the call returns the fixture's scripted final turn
+    /// (proves agent loop completed) AND that the trace row
+    /// actually landed in `ask._traces` (proves the post-query
+    /// INSERT succeeded — the original symptom).
+    #[pg_test]
+    fn readonly_ask_does_not_leak_transaction_read_only() {
+        use_fixture("smoke_sql_query");
+        // use_fixture() turns telemetry off to keep most tests fast;
+        // this regression specifically needs the trace INSERT to fire
+        // so we can prove it succeeds, so turn it back on.
+        Spi::run("SET pg_ask.trace_enabled = on").unwrap();
+
+        let traces_before: Option<i64> =
+            Spi::get_one("SELECT count(*) FROM ask._traces WHERE kind = 'ask'").unwrap();
+
+        let answer: Option<String> =
+            Spi::get_one("SELECT ask.ask('count the relations in pg_class')").unwrap();
+        assert!(answer.is_some(), "ask.ask should have returned a final text");
+
+        let traces_after: Option<i64> =
+            Spi::get_one("SELECT count(*) FROM ask._traces WHERE kind = 'ask'").unwrap();
+        assert_eq!(
+            traces_after.unwrap_or(0),
+            traces_before.unwrap_or(0) + 1,
+            "telemetry::write INSERT must succeed after the readonly query \
+             — if this fails the SET LOCAL transaction_read_only = on \
+             from sql_query is leaking back into the parent transaction"
+        );
+
+        // Belt-and-braces: a manual INSERT in the same backend
+        // after ask.ask() must also work. This catches the bug at
+        // the user-visible level (any post-ask SQL in the same
+        // session was failing, not just our own telemetry write).
+        Spi::run("CREATE TEMP TABLE _post_ask_probe (n int)").unwrap();
+        Spi::run("INSERT INTO _post_ask_probe VALUES (1)").unwrap();
+        let n: Option<i64> =
+            Spi::get_one("SELECT count(*) FROM _post_ask_probe").unwrap();
+        assert_eq!(n, Some(1));
+    }
+
     /// `ask.preview` runs sql_guard + EXPLAIN against the model's SQL
     /// without executing it. We hand it a known-good SELECT and assert
     /// the planner returned at least one row and one referenced table.

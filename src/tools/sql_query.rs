@@ -154,23 +154,35 @@ fn run_query_to_text(
     statement_timeout_ms: u64,
     sensitive: &[String],
 ) -> std::result::Result<String, String> {
-    // Phase 1: audit insert (captures uuid) + GUC setup. SECURITY DEFINER
-    // helper handles the audit row so we don't need INSERT on _sql_audit
-    // for PUBLIC (C3); it returns the uuid so phase 3 can update the
-    // same row with the post-query stats.
-    let audit_id = audit_begin(query, readonly, statement_timeout_ms)?;
+    // Phase 1: audit insert (captures uuid). Stays in the parent
+    // transaction — we WANT the in-flight row visible even if the
+    // subtxn below aborts, otherwise readonly-mode failures would
+    // leave no audit trace at all.
+    let audit_id = audit_insert_only(query, readonly)?;
 
-    // Phase 2: the actual query, wrapped in a subtxn so any ERROR
-    // stays contained. The closure must be `UnwindSafe`; `&str` and
-    // `&[String]` already are, and we move `sensitive`'s slice via
-    // a fresh borrow inside the closure.
+    // Phase 2: the actual query, wrapped in a subtxn so:
+    //  (a) any ERROR stays contained (H2: poisoned-parent fix), and
+    //  (b) the per-call `SET LOCAL statement_timeout` /
+    //      `SET LOCAL transaction_read_only = on` GUCs are scoped to
+    //      the subtxn. Without (b) those `SET LOCAL`s persist for
+    //      the rest of the OUTER transaction — every subsequent
+    //      INSERT in the same `ask.ask()` call (telemetry::write,
+    //      session::record_turn, the next sql_query's audit row,
+    //      ...) would fail with "25006 cannot execute INSERT in a
+    //      read-only transaction". End-to-end reproducer: any
+    //      `SELECT ask.ask('...')` in readonly mode with telemetry
+    //      enabled (the default). Same root cause as the EXPLAIN
+    //      bug fixed in `src/planner/explain.rs`; both call sites
+    //      need the subtxn wrapper for the same reason.
     let started = Instant::now();
     let sensitive_clone: Vec<String> = sensitive.to_vec();
     let query_owned = query.to_string();
     let max_rows_copy = max_rows;
+    let timeout_ms = statement_timeout_ms;
     let subtxn_result = crate::infra::subtxn::run_in_subtransaction(
         Some("pg_ask_sql_query"),
         move || {
+            apply_per_call_gucs(readonly, timeout_ms)?;
             render::run_to_table(&query_owned, max_rows_copy, &sensitive_clone)
                 .map_err(crate::infra::errors::AskError::Sql)
         },
@@ -190,20 +202,19 @@ fn run_query_to_text(
     result.map(|RenderedTable { text, .. }| text)
 }
 
-/// Insert the in-flight audit row and apply per-call GUCs. Returns the
-/// audit uuid so `audit_finish` can update the same row.
-fn audit_begin(
+/// Insert the in-flight audit row in the parent transaction and
+/// return its uuid so `audit_finish` can update it later. Does NOT
+/// touch `transaction_read_only` or `statement_timeout` — those are
+/// scoped to the subtxn that runs the user query (see
+/// `apply_per_call_gucs` and the call-site comment in
+/// `run_query_to_text`).
+fn audit_insert_only(
     query: &str,
     readonly: bool,
-    statement_timeout_ms: u64,
 ) -> std::result::Result<Option<Uuid>, String> {
-    let timeout_sql = format!("SET LOCAL statement_timeout = {statement_timeout_ms}");
-    let readonly_sql = "SET LOCAL transaction_read_only = on";
-
     Spi::connect_mut(|client| -> std::result::Result<Option<Uuid>, String> {
-        // Audit FIRST, before flipping transaction_read_only. The
-        // SECURITY DEFINER helper returns the inserted uuid so we can
-        // update row_count / error / latency_ms after the query runs.
+        // SECURITY DEFINER helper so PUBLIC doesn't need INSERT on
+        // _sql_audit (C3); returns the uuid via RETURNING.
         let tup = client
             .select(
                 "SELECT ask._sql_audit_insert($1, $2, $3, 'sql_query')",
@@ -215,16 +226,29 @@ fn audit_begin(
             .into_iter()
             .next()
             .and_then(|row| row.get_datum_by_ordinal(1).ok()?.value::<Uuid>().ok().flatten());
+        Ok(audit_id)
+    })
+}
 
+/// Apply per-call GUCs from INSIDE the query subtransaction. The
+/// `SET LOCAL` scope is the enclosing transaction; calling this from
+/// inside a subtxn means the GUCs auto-revert when the subtxn
+/// releases, instead of leaking into the parent `ask.ask()` call.
+fn apply_per_call_gucs(
+    readonly: bool,
+    statement_timeout_ms: u64,
+) -> crate::infra::errors::Result<()> {
+    let timeout_sql = format!("SET LOCAL statement_timeout = {statement_timeout_ms}");
+    Spi::connect_mut(|client| {
         client
             .update(timeout_sql.as_str(), None, &[])
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::infra::errors::AskError::Sql(e.to_string()))?;
         if readonly {
             client
-                .update(readonly_sql, None, &[])
-                .map_err(|e| e.to_string())?;
+                .update("SET LOCAL transaction_read_only = on", None, &[])
+                .map_err(|e| crate::infra::errors::AskError::Sql(e.to_string()))?;
         }
-        Ok(audit_id)
+        Ok(())
     })
 }
 

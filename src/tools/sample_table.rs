@@ -117,30 +117,21 @@ fn run_sample(
     statement_timeout_ms: u64,
     sensitive: &[String],
 ) -> std::result::Result<String, String> {
-    let timeout_sql = format!("SET LOCAL statement_timeout = {statement_timeout_ms}");
-    let readonly_sql = "SET LOCAL transaction_read_only = on";
-
-    Spi::connect_mut(|client| -> std::result::Result<(), String> {
-        // Audit FIRST, before transaction_read_only is flipped. Same
-        // pattern as sql_query::run_query_to_text — see the comment
-        // there. row_count = -1 means "in flight / unknown".
-        // Audit via SECURITY DEFINER helper (C3); see sql_query for context.
-        let _ = client.update(
-            "SELECT ask._sql_audit_insert($1, $2, $3, 'sample_table')",
-            None,
-            &[query.into(), (-1i32).into(), readonly.into()],
-        );
-
+    // Audit row stays in the parent txn so it's visible even if the
+    // subtxn aborts. Errors here are swallowed — audit is
+    // best-effort and must never break the user's call. We discard
+    // the SpiTupleTable rather than returning it so the closure has
+    // no lifetime escape problem.
+    let _ = Spi::connect_mut(|client| -> std::result::Result<(), String> {
         client
-            .update(timeout_sql.as_str(), None, &[])
+            .update(
+                "SELECT ask._sql_audit_insert($1, $2, $3, 'sample_table')",
+                None,
+                &[query.into(), (-1i32).into(), readonly.into()],
+            )
             .map_err(|e| e.to_string())?;
-        if readonly {
-            client
-                .update(readonly_sql, None, &[])
-                .map_err(|e| e.to_string())?;
-        }
         Ok(())
-    })?;
+    });
 
     // sample_table knows the schema/table the columns come from, so we
     // expand each pattern to its bare-name / table.col / schema.table.col
@@ -149,10 +140,38 @@ fn run_sample(
     // qualification (e.g. `sensitive_columns = 'public.users.password'`).
     let expanded = expand_patterns_for_table(schema, table, sensitive);
 
-    // Privilege guard: invisible tables return 0 rows naturally; we
-    // don't leak existence by distinguishing "no rows" from "no privilege".
-    let RenderedTable { text, .. } = render::run_to_table(query, max_rows, &expanded)?;
-    Ok(text)
+    // Subtxn wrapper: scopes `SET LOCAL statement_timeout` and the
+    // readonly flag so they don't leak into the rest of the
+    // surrounding `ask.ask()` transaction. Without this, every
+    // subsequent INSERT (telemetry::write, session::record_turn,
+    // next tool's audit row) would fail with 25006 once
+    // transaction_read_only landed on the parent. Mirrors
+    // sql_query::run_query_to_text; see that file's docs for the
+    // full motivation.
+    let timeout_sql = format!("SET LOCAL statement_timeout = {statement_timeout_ms}");
+    let query_owned = query.to_string();
+    let max_rows_copy = max_rows;
+    let expanded_clone = expanded.clone();
+    let result: crate::infra::errors::Result<RenderedTable> =
+        crate::infra::subtxn::run_in_subtransaction(Some("pg_ask_sample_table"), move || {
+            Spi::connect_mut(|client| -> crate::infra::errors::Result<()> {
+                client
+                    .update(timeout_sql.as_str(), None, &[])
+                    .map_err(|e| crate::infra::errors::AskError::Sql(e.to_string()))?;
+                if readonly {
+                    client
+                        .update("SET LOCAL transaction_read_only = on", None, &[])
+                        .map_err(|e| crate::infra::errors::AskError::Sql(e.to_string()))?;
+                }
+                Ok(())
+            })?;
+            // Privilege guard: invisible tables return 0 rows naturally;
+            // we don't leak existence by distinguishing "no rows" from
+            // "no privilege".
+            render::run_to_table(&query_owned, max_rows_copy, &expanded_clone)
+                .map_err(crate::infra::errors::AskError::Sql)
+        });
+    result.map(|r| r.text).map_err(|e| e.to_string())
 }
 
 /// Expand `sensitive_columns` patterns so the render helper's bare-name +
