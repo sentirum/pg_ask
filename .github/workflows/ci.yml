@@ -58,11 +58,25 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
 
-      - name: Install PG18 dev headers + build deps
+      # We install the full postgresql-18 SERVER (not just
+      # dev headers) so pgrx-test can use the system pg_config
+      # and skip the multi-GB `pgrx init download` build, then
+      # chown the extension + lib dirs so the runner user can
+      # write into them without sudo. The throwaway VM model
+      # makes this safe.
+      - name: Install PG18 + build deps
         run: |
           sudo apt-get install -y \
-            postgresql-server-dev-18 \
+            postgresql-18 postgresql-server-dev-18 \
             libclang-dev clang pkg-config
+          # Stop the system cluster pgrx-test won't use it; pgrx
+          # always boots its own data dir under ~/.pgrx.
+          sudo systemctl stop postgresql || true
+          # Make extension dirs writable so cargo pgrx install /
+          # pgrx-test can drop pg_ask.{control,sql,so} in place.
+          sudo chown -R "$USER" \
+            /usr/share/postgresql/18/extension \
+            /usr/lib/postgresql/18/lib
 
       - name: Cache cargo-pgrx binary
         id: cache-pgrx-bin
@@ -75,13 +89,13 @@ jobs:
         if: steps.cache-pgrx-bin.outputs.cache-hit != 'true'
         run: cargo install cargo-pgrx --locked --version ${{ env.PGRX_VERSION }}
 
-      # Use the SYSTEM pg_config (from postgresql-server-dev-18) for
-      # header layout, but tell pgrx to create its OWN cluster under
-      # ~/.pgrx — this is what makes `cargo pgrx test` work without
-      # root. Without this pgrx-test would try to install the
-      # extension into /usr/share/postgresql and fail with EACCES.
-      - name: Initialise pgrx (own cluster under ~/.pgrx)
-        run: cargo pgrx init --pg18 download
+      # Point pgrx at the SYSTEM pg18 install (the chown above
+      # gives the runner write access to the extension dirs).
+      # This is much faster than `--pg18 download` which would
+      # configure + compile PG18 from source (and would need
+      # libreadline-dev / bison / flex / etc).
+      - name: Initialise pgrx (system PG18)
+        run: cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
 
       - name: rustfmt check
         run: cargo fmt --all -- --check
