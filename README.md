@@ -79,6 +79,36 @@ SELECT ask.ask('…')
 - **No `unsafe` outside `src/infra/subtxn.rs`**; all I/O is blocking `ureq`
   (PG backend is single-threaded, no async runtime).
 
+## APT (Debian / Ubuntu)
+
+```bash
+sudo install -d /etc/apt/keyrings
+
+curl -fsSL https://sentirum.github.io/pg_ask/pubkey.asc \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/pg_ask.gpg
+
+echo "deb [signed-by=/etc/apt/keyrings/pg_ask.gpg] \
+https://sentirum.github.io/pg_ask $(lsb_release -cs) main" \
+  | sudo tee /etc/apt/sources.list.d/pg_ask.list
+
+sudo apt update
+sudo apt install postgresql-18-pg-ask
+```
+
+Supported: **Debian 12 (bookworm)**, **Debian 13 (trixie)**,
+**Ubuntu 22.04 (jammy)**, **Ubuntu 24.04 (noble)** —
+`amd64` + `arm64`. Landing page with all instructions:
+[sentirum.github.io/pg_ask](https://sentirum.github.io/pg_ask).
+
+Then, in psql:
+
+```sql
+CREATE EXTENSION pg_ask;
+SELECT ask.config('provider', 'anthropic');
+SELECT ask.config('api_key',  'sk-ant-...');
+SELECT ask.ask('how many tables are in this database?');
+```
+
 ## Docker (quickest start)
 
 ```bash

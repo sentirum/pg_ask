@@ -1,0 +1,7 @@
+Origin: Sentirum
+Label: pg_ask
+Codename: __CODENAME__
+Architectures: amd64 arm64
+Components: main
+Description: pg_ask APT repository (__CODENAME__)
+SignWith: __KEY_ID__

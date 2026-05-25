@@ -1,0 +1,327 @@
+name: APT
+
+# Build .deb packages for every supported (distro × arch) combination
+# and publish them to the GitHub Pages branch (gh-pages) as a signed
+# apt repository served at https://sentirum.github.io/pg_ask/.
+#
+# Pipeline:
+#
+#   build (matrix 4 distros × 2 archs = 8 jobs)
+#                │
+#                ▼
+#         publish (1 job)
+#           ├─ download all .deb artefacts
+#           ├─ reprepro: assemble per-codename repo
+#           ├─ sign Release with APT_GPG_PRIVATE_KEY
+#           └─ git push → gh-pages branch
+#
+# Triggered by tag pushes (matches release.yml / docker.yml) and by
+# workflow_dispatch so we can rebuild for an existing tag from the
+# Actions UI. apt.yml is the third leg of the v* tag fan-out alongside
+# release.yml (tarball) and docker.yml (GHCR image).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.5.3)"
+        required: true
+        default: "v0.5.3"
+
+env:
+  PG_MAJOR: "18"
+  PGRX_VERSION: "=0.18.0"
+
+permissions:
+  contents: write   # needed for gh-pages push
+
+jobs:
+  # ─────────────────────────────────────────────────────
+  # 8-way matrix. Each job runs inside a distro-specific
+  # container so the resulting .deb links against the
+  # distro's libc/libssl/libpq versions — critical for a
+  # PG extension where the .so is dlopened by the system
+  # postgres binary.
+  #
+  # arm64 jobs use the native ubuntu-24.04-arm runner
+  # (same fix we applied in docker.yml); the container
+  # then provides the Debian/Ubuntu userspace on top of
+  # that arm64 kernel.
+  # ─────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.codename }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Debian 12 (bookworm)
+          - codename: bookworm
+            image:    debian:12
+            arch:     amd64
+            runner:   ubuntu-24.04
+          - codename: bookworm
+            image:    debian:12
+            arch:     arm64
+            runner:   ubuntu-24.04-arm
+
+          # Debian 13 (trixie)
+          - codename: trixie
+            image:    debian:13
+            arch:     amd64
+            runner:   ubuntu-24.04
+          - codename: trixie
+            image:    debian:13
+            arch:     arm64
+            runner:   ubuntu-24.04-arm
+
+          # Ubuntu 22.04 (jammy)
+          - codename: jammy
+            image:    ubuntu:22.04
+            arch:     amd64
+            runner:   ubuntu-24.04
+          - codename: jammy
+            image:    ubuntu:22.04
+            arch:     arm64
+            runner:   ubuntu-24.04-arm
+
+          # Ubuntu 24.04 (noble)
+          - codename: noble
+            image:    ubuntu:24.04
+            arch:     amd64
+            runner:   ubuntu-24.04
+          - codename: noble
+            image:    ubuntu:24.04
+            arch:     arm64
+            runner:   ubuntu-24.04-arm
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      # The container image starts essentially empty; install just
+      # what we need to clone, set up Rust+pgrx, and build a .deb.
+      # ca-certificates is the same gotcha we hit in the Dockerfile.
+      - name: System build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl gnupg lsb-release sudo \
+            git build-essential pkg-config \
+            libclang-dev clang \
+            fakeroot dpkg-dev
+
+      # PGDG repo for postgresql-${PG_MAJOR} on every codename
+      # (each LTS only ships its native major in the default repos;
+      # PGDG is the universal source).
+      - name: Add PGDG repo
+        run: |
+          install -d /usr/share/keyrings
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            > /etc/apt/sources.list.d/pgdg.list
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            postgresql-${{ env.PG_MAJOR }} \
+            postgresql-server-dev-${{ env.PG_MAJOR }}
+          # Stop the auto-started cluster — we only need pg_config /
+          # headers. Leaving it running can race with subsequent apt
+          # operations inside the container.
+          service postgresql stop || true
+
+      # Rust + cargo-pgrx. We pin pgrx to match Cargo.toml.
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: apt-${{ matrix.codename }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            apt-${{ matrix.codename }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-
+
+      - name: Install cargo-pgrx
+        run: |
+          cargo install cargo-pgrx --locked --version ${{ env.PGRX_VERSION }}
+          cargo pgrx init --pg${{ env.PG_MAJOR }} \
+            /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin/pg_config
+
+      # Derive VERSION from the tag (or workflow_dispatch input). The
+      # same shape as docker.yml so all three release legs stay in
+      # lockstep.
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VER="${TAG#v}"
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Build .deb
+        env:
+          VERSION:  ${{ steps.version.outputs.version }}
+          PG_MAJOR: ${{ env.PG_MAJOR }}
+          DISTRO:   ${{ matrix.codename }}
+          ARCH:     ${{ matrix.arch }}
+        run: |
+          chmod +x packaging/debian/build-deb.sh
+          packaging/debian/build-deb.sh
+
+      - name: Upload .deb artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.codename }}-${{ matrix.arch }}
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────
+  # Assemble the apt repository from every .deb artefact
+  # and push to the gh-pages branch.
+  #
+  # reprepro is the canonical tool for this — it manages
+  # the Packages/Release/InRelease files and handles GPG
+  # signing in a single `reprepro includedeb` call.
+  # ─────────────────────────────────────────────────────
+  publish:
+    name: Publish to gh-pages
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install reprepro + tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            reprepro gnupg
+
+      # Import the signing key from secrets. The trust dance:
+      # gpg --import → fingerprint → set trust to ultimate so
+      # reprepro will sign without prompting.
+      - name: Import signing key
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_KEY_ID:      ${{ secrets.APT_GPG_KEY_ID }}
+        run: |
+          if [ -z "$APT_GPG_PRIVATE_KEY" ]; then
+            echo "::error::APT_GPG_PRIVATE_KEY secret is empty"
+            exit 1
+          fi
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "use-agent" > ~/.gnupg/gpg.conf
+          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
+          printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          # Set ultimate trust so reprepro can sign non-interactively.
+          echo "${APT_GPG_KEY_ID}:6:" | gpg --import-ownertrust
+          gpg --list-secret-keys --keyid-format=long
+
+      - name: Download all .deb artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: incoming
+          pattern: deb-*
+          merge-multiple: true
+
+      - name: List downloaded .debs
+        run: |
+          echo "Found $(ls incoming/*.deb | wc -l) .deb files:"
+          ls -la incoming/
+
+      # Pull the existing apt repo state from gh-pages so reprepro can
+      # append new versions without clobbering older ones. First-time
+      # bootstrap (no gh-pages yet) falls back to an empty tree.
+      - name: Fetch existing gh-pages tree
+        run: |
+          mkdir -p public
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git clone --depth 1 --branch gh-pages \
+              "https://github.com/${{ github.repository }}.git" public
+            # Drop the checkout's .git so we can re-init clean below.
+            rm -rf public/.git
+          else
+            echo "gh-pages does not exist yet — bootstrapping"
+          fi
+          mkdir -p public/apt/conf public/apt/incoming
+
+      # Compose distributions config from the template. Every
+      # codename gets a stanza, all signed by APT_GPG_KEY_ID.
+      - name: Render reprepro distributions
+        env:
+          APT_GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
+        run: |
+          : > public/apt/conf/distributions
+          for codename in bookworm trixie jammy noble; do
+            sed -e "s|__CODENAME__|$codename|" \
+                -e "s|__KEY_ID__|$APT_GPG_KEY_ID|" \
+                packaging/apt/distributions.template \
+              >> public/apt/conf/distributions
+            echo "" >> public/apt/conf/distributions
+          done
+          cat public/apt/conf/distributions
+
+      # Each .deb filename embeds its codename (e.g.
+      # *_0.5.3-1+bookworm_amd64.deb). reprepro derives the target
+      # codename from the filename + control.
+      - name: Ingest .deb files into reprepro
+        run: |
+          cd public/apt
+          for deb in ../../incoming/*.deb; do
+            # Codename is the bit between "+" and the next "_" in
+            # the version field, e.g. 0.5.3-1+bookworm.
+            codename=$(basename "$deb" | sed -E 's/.*\+([a-z]+)_.*/\1/')
+            echo "==> includedeb $codename $(basename "$deb")"
+            reprepro --basedir . includedeb "$codename" "$deb"
+          done
+
+      - name: Copy pubkey + landing page
+        run: |
+          cp packaging/apt/pubkey.asc public/pubkey.asc
+          sed "s|__BUILD_DATE__|$(date -u +'%Y-%m-%d %H:%M UTC')|" \
+            packaging/apt/index.html.template > public/index.html
+          # Mirror the apt tree to the repo root so the published
+          # URL is …github.io/pg_ask/dists/<codename>/… instead of
+          # …github.io/pg_ask/apt/dists/…
+          cp -a public/apt/dists public/dists
+          cp -a public/apt/pool  public/pool
+
+      - name: Sanity check repo metadata
+        run: |
+          for c in bookworm trixie jammy noble; do
+            echo "=== $c ==="
+            ls public/dists/$c/main/binary-amd64/ || true
+            ls public/dists/$c/main/binary-arm64/ || true
+          done
+
+      # Deploy via the maintained peaceiris action — it does the
+      # orphan-branch dance correctly and force-pushes only if the
+      # tree actually changed.
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./public
+          commit_message: "apt: publish ${{ github.event.inputs.tag || github.ref_name }}"
+          user_name:  "github-actions[bot]"
+          user_email: "github-actions[bot]@users.noreply.github.com"
