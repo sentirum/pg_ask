@@ -106,11 +106,47 @@ fn ast_checks(stmts: &[sqlparser::ast::Statement], mode: GuardMode) -> Result<()
     // Walking the AST normalises identifiers for us.
     secrets_visitor::check(&stmts[0])?;
 
+    // H12 (v0.5.2 review): the token-level no_banned_functions check
+    // misses quoted forms (`"pg_sleep"(60)`, `pg_catalog."pg_sleep"(60)`)
+    // because the lexer doesn't strip quotes before matching. Walk the
+    // AST too — quoted identifiers normalise here.
+    banned_funcs_visitor::check(&stmts[0])?;
+
+    classify_statement(&stmts[0], mode)
+}
+
+fn classify_statement(stmt: &sqlparser::ast::Statement, mode: GuardMode) -> Result<()> {
     use sqlparser::ast::Statement;
-    match &stmts[0] {
+    match stmt {
         // Read-only shapes
-        Statement::Query(_) => Ok(()),
-        Statement::Explain { .. } => Ok(()),
+        Statement::Query(q) => {
+            // H11 (v0.5.2 review): a `WITH x AS (DELETE … RETURNING …)
+            // SELECT * FROM x` is `Statement::Query` at the top level, so
+            // the classify-by-shape match below would happily accept it
+            // in readonly mode. Walk the CTE bodies and reject any
+            // data-modifying statement we find when readonly is on.
+            if mode == GuardMode::Readonly {
+                if let Some(with) = &q.with {
+                    for cte in &with.cte_tables {
+                        check_query_for_writes(&cte.query)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        // H10 (v0.5.2 review): EXPLAIN was a no-op before — the inner
+        // statement was never re-validated, so `EXPLAIN ANALYZE DELETE
+        // FROM users` would slip past in readonly mode (ANALYZE actually
+        // runs the inner statement). Recurse into the wrapped statement
+        // with the same mode so all the other guards apply.
+        Statement::Explain { statement, analyze, .. } => {
+            // Even without ANALYZE, EXPLAIN can have side effects on
+            // some statements (write CTEs evaluate). Re-classify the
+            // inner statement unconditionally; if it's a plain SELECT
+            // we'll allow it the same way the top-level match would.
+            let _ = analyze;
+            classify_statement(statement, mode)
+        }
         Statement::Copy { .. } => Err(AskError::GuardRejected(
             "COPY is not allowed".into(),
         )),
@@ -146,6 +182,35 @@ fn ast_checks(stmts: &[sqlparser::ast::Statement], mode: GuardMode) -> Result<()
             Err(AskError::GuardRejected(format!(
                 "statement type `{short}` is not allowed"
             )))
+        }
+    }
+}
+
+/// Walk a Query body (and its nested CTEs) looking for data-modifying
+/// statements. H11 fix: catches `WITH x AS (DELETE … RETURNING) SELECT …`
+/// in readonly mode.
+fn check_query_for_writes(query: &sqlparser::ast::Query) -> Result<()> {
+    use sqlparser::ast::SetExpr;
+    match query.body.as_ref() {
+        SetExpr::Insert(_) => Err(AskError::GuardRejected(
+            "INSERT inside a CTE is not allowed in readonly mode".into(),
+        )),
+        SetExpr::Update(_) => Err(AskError::GuardRejected(
+            "UPDATE inside a CTE is not allowed in readonly mode".into(),
+        )),
+        SetExpr::Delete(_) => Err(AskError::GuardRejected(
+            "DELETE inside a CTE is not allowed in readonly mode".into(),
+        )),
+        SetExpr::Query(inner) => check_query_for_writes(inner),
+        // SELECT / VALUES / SetOperation: descend into any nested CTE
+        // bodies they carry (rare but possible).
+        _ => {
+            if let Some(with) = &query.with {
+                for cte in &with.cte_tables {
+                    check_query_for_writes(&cte.query)?;
+                }
+            }
+            Ok(())
         }
     }
 }
@@ -305,6 +370,79 @@ mod secrets_visitor {
     }
 }
 
+/// AST walker variant of `rules::no_banned_functions`. H12 (v0.5.2
+/// review): the lexer-level checker compares bare tokens and so misses
+/// `"pg_sleep"(60)` and `pg_catalog."pg_read_file"('/etc/passwd')`,
+/// because the quotes survive in the token stream. sqlparser strips
+/// quotes during parsing, so an AST walker normalises them for us.
+///
+/// The function list is the same as the lexer-level one but kept here
+/// independently so they can evolve separately; the lexer is still
+/// needed for queries that don't parse (where the AST walker can't run).
+mod banned_funcs_visitor {
+    use crate::infra::errors::{AskError, Result};
+    use sqlparser::ast::{Expr, Function, Statement, Visit, Visitor};
+    use std::ops::ControlFlow;
+
+    /// Functions we never want the model to call. Same surface as the
+    /// lexer-level deny-list; see `rules.rs` for the rationale per name.
+    const BANNED: &[&str] = &[
+        "pg_sleep",
+        "pg_sleep_for",
+        "pg_sleep_until",
+        "pg_read_file",
+        "pg_read_binary_file",
+        "pg_ls_dir",
+        "pg_stat_file",
+        "lo_import",
+        "lo_export",
+        "dblink",
+        "dblink_exec",
+        "dblink_open",
+        "pg_terminate_backend",
+        "pg_cancel_backend",
+        "pg_reload_conf",
+        "pg_rotate_logfile",
+        "pg_advisory_lock",        // ours: ask should not be holding session-scope locks
+        "pg_advisory_unlock_all",
+    ];
+
+    pub fn check(stmt: &Statement) -> Result<()> {
+        let mut v = Walker::default();
+        match stmt.visit(&mut v) {
+            ControlFlow::Continue(()) => Ok(()),
+            ControlFlow::Break(msg) => Err(AskError::GuardRejected(msg)),
+        }
+    }
+
+    #[derive(Default)]
+    struct Walker;
+
+    impl Visitor for Walker {
+        type Break = String;
+
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+            if let Expr::Function(func) = expr {
+                if let Some(msg) = matches_banned(func) {
+                    return ControlFlow::Break(msg);
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    fn matches_banned(func: &Function) -> Option<String> {
+        let last = func.name.0.last()?.to_string().to_ascii_lowercase();
+        let normalized = last.trim_matches('"');
+        if BANNED.iter().any(|b| b.eq_ignore_ascii_case(normalized)) {
+            return Some(format!(
+                "function `{normalized}` is on the deny-list (quoted or schema-qualified forms are not a bypass)"
+            ));
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +492,61 @@ mod tests {
         assert!(ok("SELECT current_setting('work_mem')"));
         assert!(ok("SELECT current_setting('search_path')"));
         assert!(ok("SELECT current_setting('app.user_id')"));
+    }
+
+    #[test]
+    fn rejects_explain_wrapping_a_write_in_readonly() {
+        // H10 (v0.5.2 review): EXPLAIN ANALYZE actually executes the
+        // wrapped statement. Even plain EXPLAIN can evaluate write
+        // CTEs. The guard now recurses into the inner statement.
+        assert!(rejected("EXPLAIN DELETE FROM users"));
+        assert!(rejected("EXPLAIN ANALYZE INSERT INTO t VALUES (1)"));
+        assert!(rejected("EXPLAIN ANALYZE UPDATE t SET a = 1"));
+        // EXPLAIN on a plain SELECT remains fine.
+        assert!(ok("EXPLAIN SELECT 1"));
+        assert!(ok("EXPLAIN (FORMAT JSON) SELECT 1"));
+    }
+
+    #[test]
+    fn rejects_data_modifying_ctes_in_readonly() {
+        // H11 (v0.5.2 review): writable CTEs (`WITH x AS (DELETE
+        // RETURNING ...) SELECT ...`) parse as Statement::Query, so the
+        // top-level shape check would have accepted them. The CTE
+        // walker now rejects in readonly mode.
+        assert!(rejected(
+            "WITH d AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM d"
+        ));
+        assert!(rejected(
+            "WITH u AS (UPDATE t SET a = 1 RETURNING *) SELECT * FROM u"
+        ));
+        assert!(rejected(
+            "WITH i AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM i"
+        ));
+        // Non-write CTE remains fine.
+        assert!(ok("WITH s AS (SELECT 1 AS x) SELECT * FROM s"));
+    }
+
+    #[test]
+    fn allows_data_modifying_ctes_in_writable_mode() {
+        let writable = GuardMode::Writable;
+        assert!(validate(
+            "WITH d AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM d",
+            writable
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_quoted_banned_functions() {
+        // H12 (v0.5.2 review): the bare lexer-level deny-list misses
+        // these. The AST walker normalises identifiers, so quoted and
+        // schema-qualified calls fall on the same code path.
+        assert!(rejected("SELECT \"pg_sleep\"(60)"));
+        assert!(rejected("SELECT pg_catalog.\"pg_read_file\"('/etc/passwd')"));
+        assert!(rejected("SELECT \"pg_catalog\".\"dblink\"('host=evil', 'select 1')"));
+        // Identifier casing variations.
+        assert!(rejected("SELECT PG_SLEEP(60)"));
+        assert!(rejected("SELECT Pg_Sleep(60)"));
     }
 
     #[test]

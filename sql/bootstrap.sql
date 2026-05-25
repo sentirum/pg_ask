@@ -19,6 +19,20 @@ CREATE TABLE IF NOT EXISTS ask._config (
 -- Session log. One row per multi-turn conversation. `owner` is captured
 -- at create-time and every chat() / clear_session() call checks it against
 -- current_user so sessions cannot leak across roles.
+--
+-- H4 note: the table-level DEFAULTs intentionally stay on `current_user`,
+-- not `session_user`. Rationale:
+--   * SECURITY DEFINER helpers (ask._memory_insert, ask._tool_register, …)
+--     always pass `session_user` explicitly, so the default is never
+--     observed under a definer transition.
+--   * Direct INSERTs from user sessions have current_user == session_user,
+--     so the default value is the same either way.
+--   * Operators who deliberately `SET ROLE` to act as another role expect
+--     subsequent INSERTs to be attributed to the assumed role; only
+--     `session_user` would override that, which would surprise them.
+-- `_write_trace` is the one place where the choice matters at runtime
+-- (payload-driven INSERT inside a SECURITY DEFINER body); that helper
+-- uses session_user explicitly.
 CREATE TABLE IF NOT EXISTS ask._sessions (
     id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     owner      name        NOT NULL DEFAULT current_user,
@@ -65,6 +79,15 @@ CREATE INDEX IF NOT EXISTS _traces_caller_idx ON ask._traces (caller, ts DESC);
 -- The writer takes a single jsonb payload so the Rust side never has to
 -- learn the column order. SECURITY DEFINER lets ordinary roles produce
 -- trace rows without holding INSERT on _traces directly.
+--
+-- H4 (v0.5.2 review): the default caller is `session_user` rather than
+-- `current_user`. Inside a SECURITY DEFINER body Postgres switches
+-- current_user to the function owner (the extension superuser), so
+-- using current_user here meant every trace row was attributed to the
+-- definer regardless of who actually called ask.ask(). session_user
+-- preserves the original connecting role even through SECURITY DEFINER
+-- transitions. The Rust callers continue to override via
+-- payload->>'caller' when they need to record a specific identity.
 CREATE OR REPLACE FUNCTION ask._write_trace(payload jsonb)
 RETURNS uuid
 LANGUAGE sql
@@ -75,7 +98,7 @@ AS $$
         (caller, kind, question, iterations, tool_calls,
          final_text, provider, model, latency_ms, error)
     VALUES (
-        COALESCE(payload->>'caller',     current_user),
+        COALESCE(payload->>'caller',     session_user),
         payload->>'kind',
         COALESCE(payload->>'question',   ''),
         COALESCE((payload->>'iterations')::int, 0),
@@ -92,20 +115,44 @@ $$;
 -- ---------------------------------------------------------------------------
 -- Long-term memory (requires the `vector` extension).
 --
--- We detect pgvector at install time rather than declaring a hard dependency
--- in ask.control because most deployments don't need memory and we don't
--- want to force the operator to install pgvector for the chat / preview
--- surface. If pgvector is missing, `_memories` is simply not created and the
--- memory.* SQL surface returns a clean error pointing the operator at
--- `CREATE EXTENSION vector`.
+-- H1 (v0.5.2 review): the table create lives in a SECURITY DEFINER
+-- helper that the Rust layer can also call lazily on first use. Before
+-- this fix, `CREATE EXTENSION pg_ask` installed without pgvector
+-- skipped the table create entirely, and a later `CREATE EXTENSION
+-- vector` left the memory layer in a broken state: pgvector_installed()
+-- returned true so ensure_memory_available() passed, but the first
+-- INSERT then ERRORed with `relation ask._memories does not exist`.
+--
+-- Now the helper is idempotent (CREATE IF NOT EXISTS everywhere) and
+-- gated on pgvector being present; bootstrap calls it once, and so
+-- does every public memory entry point through `ensure_memory_table`.
 --
 -- Embedding dimension is fixed at 1536 (OpenAI text-embedding-3-small,
 -- Gemini text-embedding-004). Operators using larger models must ALTER
 -- the column after install — see docs/SECURITY.md.
 -- ---------------------------------------------------------------------------
-DO $bootstrap_memory$
+CREATE OR REPLACE FUNCTION ask._memory_bootstrap()
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+        RETURN false;
+    END IF;
+    -- Already installed? Cheap fast-path so a hot recall() doesn't pay
+    -- for the DDL probes every call.
+    IF EXISTS (SELECT 1 FROM pg_class
+                WHERE relnamespace = 'ask'::regnamespace
+                  AND relname = '_memories') THEN
+        RETURN true;
+    END IF;
+
+    -- DDL goes through EXECUTE because the vector type may not have been
+    -- known to the parser when this function was compiled (it isn't
+    -- referenced at parse time, only at execute time).
+    EXECUTE $ddl$
         CREATE TABLE IF NOT EXISTS ask._memories (
             id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
             owner      name        NOT NULL DEFAULT current_user,
@@ -115,42 +162,36 @@ BEGIN
             embedding  vector(1536) NOT NULL,
             tsv        tsvector    GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
             created_at timestamptz NOT NULL DEFAULT now()
-        );
-        -- Ownership / namespace listing index.
-        CREATE INDEX IF NOT EXISTS _memories_owner_ns_idx
-            ON ask._memories (owner, namespace, created_at DESC);
-        -- Full-text rank for the BM25-ish half of the hybrid score.
-        CREATE INDEX IF NOT EXISTS _memories_tsv_idx
-            ON ask._memories USING gin (tsv);
-        -- ANN index. IVFFlat (cosine) keeps build time low and matches the
-        -- single-tenant scale most pg_ask deployments will have; operators
-        -- with millions of rows can DROP+REINDEX to HNSW after the fact.
-        BEGIN
-            CREATE INDEX IF NOT EXISTS _memories_embedding_idx
-                ON ask._memories USING ivfflat (embedding vector_cosine_ops)
-                WITH (lists = 100);
-        EXCEPTION WHEN feature_not_supported THEN
-            -- Older pgvector builds without ivfflat fall back to no ANN index;
-            -- the cosine search still works, just sequentially.
-            NULL;
-        END;
-        -- No direct DML grant: writes go through ask._memory_insert /
-        -- ask._memory_delete_owned (SECURITY DEFINER), which enforce the
-        -- owner predicate. SELECT remains GRANT-controlled by the
-        -- blanket statement below + the optional RLS policy. See C3 in
-        -- docs/SECURITY.md.
-        GRANT SELECT ON ask._memories TO PUBLIC;
-        -- Defense-in-depth: row-level policy so even a future grant
-        -- typo can't expose another role's memories. We enable RLS
-        -- *and* a permissive policy keyed on session_user; superusers
-        -- bypass RLS by default (FORCE not used).
-        ALTER TABLE ask._memories ENABLE ROW LEVEL SECURITY;
-        DROP POLICY IF EXISTS _memories_owner_select ON ask._memories;
-        CREATE POLICY _memories_owner_select ON ask._memories
-            FOR SELECT USING (owner = session_user);
-    END IF;
+        )
+    $ddl$;
+    CREATE INDEX IF NOT EXISTS _memories_owner_ns_idx
+        ON ask._memories (owner, namespace, created_at DESC);
+    CREATE INDEX IF NOT EXISTS _memories_tsv_idx
+        ON ask._memories USING gin (tsv);
+    BEGIN
+        CREATE INDEX IF NOT EXISTS _memories_embedding_idx
+            ON ask._memories USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = 100);
+    EXCEPTION WHEN feature_not_supported THEN
+        -- Older pgvector builds without ivfflat fall back to no ANN index.
+        NULL;
+    END;
+
+    -- No direct DML grant: writes go through ask._memory_insert /
+    -- ask._memory_delete_owned (SECURITY DEFINER), which enforce the
+    -- owner predicate. SELECT stays public + RLS-policed below.
+    EXECUTE 'GRANT SELECT ON ask._memories TO PUBLIC';
+    EXECUTE 'ALTER TABLE ask._memories ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'DROP POLICY IF EXISTS _memories_owner_select ON ask._memories';
+    EXECUTE 'CREATE POLICY _memories_owner_select ON ask._memories '
+         || 'FOR SELECT USING (owner = session_user)';
+    RETURN true;
 END
-$bootstrap_memory$;
+$$;
+
+-- Run it once now so the install-time table create still happens when
+-- pgvector is already present at CREATE EXTENSION time.
+DO $bootstrap_memory$ BEGIN PERFORM ask._memory_bootstrap(); END $bootstrap_memory$;
 
 -- User-defined tools registry. Operators register SQL snippets that the
 -- agent can invoke like built-in tools. Body is a SQL statement template
@@ -174,11 +215,20 @@ CREATE TABLE IF NOT EXISTS ask._sql_audit (
     caller     name        NOT NULL DEFAULT current_user,
     db         name        NOT NULL DEFAULT current_database(),
     query      text        NOT NULL,
+    -- row_count starts at -1 ("in flight") and is updated by
+    -- ask._sql_audit_finish after the query runs. A row still showing
+    -- -1 long after its `ts` means the connection died mid-query.
     row_count  int,
     error      text,
     readonly   bool        NOT NULL,
-    tool_name  text        NOT NULL
+    tool_name  text        NOT NULL,
+    -- H3 (v0.5.2 review): wall time from audit insert to result render,
+    -- in milliseconds. NULL while the row is still in flight; populated
+    -- by ask._sql_audit_finish.
+    latency_ms bigint
 );
+-- Older installs may have the table without latency_ms; add it idempotently.
+ALTER TABLE ask._sql_audit ADD COLUMN IF NOT EXISTS latency_ms bigint;
 CREATE INDEX IF NOT EXISTS _sql_audit_ts_idx     ON ask._sql_audit (ts DESC);
 CREATE INDEX IF NOT EXISTS _sql_audit_caller_idx ON ask._sql_audit (caller, ts DESC);
 
@@ -218,6 +268,49 @@ AS $$
     INSERT INTO ask._sql_audit (caller, query, row_count, readonly, tool_name)
     VALUES (session_user, query, row_count, readonly, tool_name)
     RETURNING id;
+$$;
+
+-- H3 companion: update an in-flight audit row with the post-query
+-- outcome. Caller is the tool wrapper (not the model), running under
+-- session_user; the WHERE filter is on `caller` so a malicious extension
+-- can't update someone else's audit row by guessing its uuid.
+-- H3 caveat: this helper can only update the audit row in writable
+-- transactions. When the surrounding ask.ask() runs in readonly mode
+-- (the default), Postgres refuses to set `transaction_read_only = off`
+-- mid-transaction ("must be set before any query"), and per-function
+-- SET clauses are subject to the same restriction. The Rust caller
+-- (tools::sql_query::audit_finish) detects readonly mode and skips the
+-- helper entirely — the audit row stays at row_count = -1 ("in flight"),
+-- which we document in the table comment as the readonly-mode tombstone.
+-- Real H3 (post-query stats in readonly mode) needs a proper
+-- subtransaction via pgrx FFI; tracked separately.
+CREATE OR REPLACE FUNCTION ask._sql_audit_finish(
+    audit_id    uuid,
+    latency_ms  bigint,
+    err_message text
+) RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    n int;
+BEGIN
+    -- Note: parameters with the same names as columns (latency_ms,
+    -- error) need to be referenced via the function name as a
+    -- qualifier; otherwise plpgsql resolves them to the column. We
+    -- avoid the ambiguity by passing all three as explicit USING
+    -- variables on an EXECUTE — simpler and easier to follow.
+    EXECUTE
+        'UPDATE ask._sql_audit '
+     || 'SET row_count  = CASE WHEN $3 IS NULL THEN 0 ELSE row_count END, '
+     || '    error      = $3, '
+     || '    latency_ms = $2 '
+     || 'WHERE id = $1 AND caller = session_user'
+    USING audit_id, latency_ms, err_message;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    RETURN n > 0;
+END
 $$;
 
 -- Insert a memory row owned by the calling role. The Rust caller passes
@@ -345,12 +438,16 @@ $grant_memory_select$;
 -- PUBLIC is safe.
 REVOKE ALL ON FUNCTION ask._write_trace(jsonb)                            FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._sql_audit_insert(text, int, bool, text)       FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._sql_audit_finish(uuid, bigint, text)          FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._memory_insert(text, text, jsonb, text)        FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._memory_delete_owned(uuid)                     FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._tool_register(text, jsonb, text)              FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._tool_unregister(text)                         FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._memory_bootstrap()                            FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._write_trace(jsonb)                         TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._memory_bootstrap()                         TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._sql_audit_insert(text, int, bool, text)    TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._sql_audit_finish(uuid, bigint, text)       TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._memory_insert(text, text, jsonb, text)     TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._memory_delete_owned(uuid)                  TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._tool_register(text, jsonb, text)           TO PUBLIC;

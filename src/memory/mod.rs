@@ -120,17 +120,29 @@ pub fn namespaces() -> Result<Vec<NamespaceCount>> {
 
 /// Reject the call early when the memory layer is disabled or pgvector is
 /// absent. Cheap; runs once per public call.
+///
+/// H1 (v0.5.2 review): also runs `ask._memory_bootstrap()` so the
+/// `_memories` table exists even when pgvector was installed AFTER
+/// `CREATE EXTENSION pg_ask`. The bootstrap helper is idempotent and
+/// fast-paths out as soon as the table is present; the typical hot
+/// `recall()` only pays for a single pg_class lookup inside the helper.
 fn ensure_memory_available(cfg: &RuntimeConfig) -> Result<()> {
     if !cfg.memory_enabled {
         return Err(AskError::Sql(
             "pg_ask.memory_enabled is off — SET LOCAL pg_ask.memory_enabled = on".into(),
         ));
     }
-    if !store::pgvector_installed()? {
+    // The bootstrap helper returns false if pgvector isn't installed,
+    // so we can use a single SPI roundtrip to cover both the
+    // "pgvector missing" and the "table missing" cases. We still
+    // surface a distinct error message for missing pgvector because the
+    // operator action is different (install the extension vs. nothing).
+    let bootstrapped: Option<bool> =
+        pgrx::Spi::get_one("SELECT ask._memory_bootstrap()")
+            .map_err(|e| AskError::Sql(format!("_memory_bootstrap: {e}")))?;
+    if !bootstrapped.unwrap_or(false) {
         return Err(AskError::Sql(
-            "memory layer requires pgvector — run `CREATE EXTENSION vector;` and \
-             reload pg_ask"
-                .into(),
+            "memory layer requires pgvector — run `CREATE EXTENSION vector;` first".into(),
         ));
     }
     Ok(())

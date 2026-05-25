@@ -224,21 +224,51 @@ pub fn hybrid_search(
     //      column's analyser so token boundaries align.
     //   - Limit is clamped via min(limit, 100) — protects against the
     //      agent asking for thousands of rows.
+    //
+    // H9 (v0.5.2 review): the previous single-stage query did
+    //     ORDER BY (alpha * cosine + (1-alpha) * ts_rank_cd) DESC
+    // which the planner cannot satisfy with the ivfflat ANN index —
+    // ivfflat only accelerates `ORDER BY embedding <=> q LIMIT N`, not
+    // an arbitrary expression. The result was a full sequential scan +
+    // sort over `_memories`, which becomes painful past ~10k rows.
+    //
+    // Fix: two-stage. Stage 1 uses the ANN index to pull an over-fetch
+    // candidate set (limit * 5, with a floor of 50 so a tiny limit
+    // still benefits from FTS). Stage 2 reranks those candidates by
+    // the blended score. The candidate set is still owner/namespace
+    // filtered so we don't waste ANN slots on rows we can't return.
+    //
+    // The over-fetch multiplier is a heuristic: too low and FTS-only
+    // matches at high alpha (low FTS weight) drop out; too high and
+    // stage 1 stops being meaningfully cheaper than a full scan. 5x
+    // is the same ratio Weaviate/Qdrant use by default for hybrid;
+    // operators with adversarial recall workloads can ALTER the
+    // multiplier later via a GUC (planned but not in this fix).
     let query = "
         WITH q AS (
             SELECT $1::vector AS vec,
                    plainto_tsquery('simple', $2::text) AS tsq
+        ),
+        cand AS (
+            -- Stage 1: ANN over-fetch. Order-by uses the cosine
+            -- distance operator alone so the ivfflat index can serve
+            -- it; we pull GREATEST(limit*5, 50) rows so the rerank in
+            -- stage 2 has enough signal even at small limits.
+            SELECT m.id, m.content, m.metadata, m.embedding, m.tsv
+              FROM ask._memories m
+             WHERE m.owner = current_user
+               AND m.namespace = $4::text
+             ORDER BY m.embedding <=> (SELECT vec FROM q)
+             LIMIT GREATEST($5::int * 5, 50)
         )
-        SELECT m.id::text,
-               m.content,
-               m.metadata::text,
+        SELECT c.id::text,
+               c.content,
+               c.metadata::text,
                (
-                   ($3::float8) * (1 - (m.embedding <=> (SELECT vec FROM q)))
-                 + (1 - $3::float8) * (1.0 / (1.0 + COALESCE(ts_rank_cd(m.tsv, (SELECT tsq FROM q)), 0)))
+                   ($3::float8) * (1 - (c.embedding <=> (SELECT vec FROM q)))
+                 + (1 - $3::float8) * (1.0 / (1.0 + COALESCE(ts_rank_cd(c.tsv, (SELECT tsq FROM q)), 0)))
                ) AS score
-          FROM ask._memories m
-         WHERE m.owner = current_user
-           AND m.namespace = $4::text
+          FROM cand c
          ORDER BY score DESC
          LIMIT LEAST($5::int, 100)
     ";
