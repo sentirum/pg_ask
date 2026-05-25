@@ -19,7 +19,8 @@ SELECT pg_ask.sql('top 5 customers by lifetime revenue');
 -- FROM orders GROUP BY customer_id ORDER BY revenue DESC LIMIT 5;
 ```
 
-> **Status:** v0.2 complete — Anthropic + OpenAI + Gemini providers, agent loop,
+> **Status:** v0.3 in flight — Anthropic + OpenAI + Gemini chat, OpenAI embeddings,
+> pgvector-backed long-term memory, agent loop,
 > readonly SQL tool. OpenAI/Gemini, multi-turn sessions, and pgvector-backed
 > long-term memory land next.
 

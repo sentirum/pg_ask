@@ -61,10 +61,20 @@ pub fn run_with_history(
 
     // When the schema render went compact we expose describe_table so the
     // model can pull column detail on demand. In Full mode the menu stays
-    // minimal (just sql_query) to keep tool-routing cheap.
+    // minimal to keep tool-routing cheap.
     let need_describe = matches!(schema_summary.mode, SchemaMode::Compact);
+
+    // Memory layer is opt-in (master GUC) AND requires pgvector + embedding
+    // config. We detect it once here so the model isn't shown a `recall`
+    // tool it cannot actually use. pgvector check is a single cheap SPI
+    // call; cached for the lifetime of the agent loop via this snapshot.
+    let memory_ready = cfg.memory_enabled
+        && cfg.embedding_provider.is_some()
+        && cfg.embedding_api_key.is_some()
+        && crate::memory::store::pgvector_installed().unwrap_or(false);
+
     let tools_vec: Vec<Box<dyn Tool>> = match mode {
-        AgentMode::Execute => tools::default_toolset(&cfg, need_describe),
+        AgentMode::Execute => tools::default_toolset(&cfg, need_describe, memory_ready),
         AgentMode::GenerateOnly => Vec::new(),
     };
     let specs: Vec<ToolSpec> = tools_vec.iter().map(|t| t.spec()).collect();

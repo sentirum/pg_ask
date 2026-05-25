@@ -88,7 +88,14 @@ src/
     mod.rs                   # Tool trait + default_toolset
     sql_query.rs             # SPI executor (uses sql_guard)
     describe_table.rs        # per-table pg_catalog lookup (compact-schema mode)
+    recall.rs                # memory hybrid-search tool (compact menu when memory_ready)
     http_fetch.rs            # v0.4
+  embeddings/
+    mod.rs                   # EmbeddingProvider trait + factory
+    openai.rs                # /v1/embeddings (also Together, vLLM, llama.cpp, ...)
+  memory/
+    mod.rs                   # remember / recall / forget; pgvector-aware
+    store.rs                 # SPI primitives; hybrid_search SQL
   sql_guard/
     mod.rs                   # validate(sql, mode) -> Result<ValidatedSql>
     lexer.rs                 # tokenization
@@ -195,6 +202,13 @@ Known keys:
 | `pg_ask.tool_max_rows`           | int     | `200`                | GUC → table     |
 | `pg_ask.trace_enabled`           | bool    | `true`               | GUC → table     |
 | `pg_ask.schema_char_budget`      | int     | `16000`              | GUC → table     |
+| `pg_ask.embedding_provider`      | text    | (required for memory)| GUC → table     |
+| `pg_ask.embedding_api_key`       | text    | (required for memory)| GUC → table     |
+| `pg_ask.embedding_model`         | text    | `text-embedding-3-small` | GUC → table |
+| `pg_ask.embedding_base_url`      | text    | provider default     | GUC → table     |
+| `pg_ask.embedding_dimensions`    | int     | `1536`               | GUC → table     |
+| `pg_ask.memory_search_alpha`     | float   | `0.7`                | GUC → table     |
+| `pg_ask.memory_enabled`          | bool    | `true`               | GUC → table     |
 
 API keys are marked with `GucFlags::SUPERUSER_ONLY | NO_SHOW_ALL` so
 `SHOW ALL` and `pg_settings` don't leak them to ordinary roles.

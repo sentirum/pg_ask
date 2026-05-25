@@ -42,6 +42,33 @@ pub static TRACE_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// real-world (hundreds-of-tables) databases.
 pub static SCHEMA_CHAR_BUDGET: GucSetting<i32> = GucSetting::<i32>::new(16_000);
 
+// ---------- Embedding / memory (v0.3) ----------
+//
+// Kept as a separate provider stack from the chat layer so operators can mix
+// (OpenAI embeddings + Anthropic chat, etc.). All keys live in pg_ask.* GUCs;
+// the api_key one is SUPERUSER_ONLY | NO_SHOW_ALL.
+
+pub static EMBEDDING_PROVIDER: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+pub static EMBEDDING_API_KEY: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+pub static EMBEDDING_MODEL: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+pub static EMBEDDING_BASE_URL: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+pub static EMBEDDING_DIMENSIONS: GucSetting<i32> = GucSetting::<i32>::new(1536);
+
+/// Blend weight in [0,1] between cosine similarity and full-text BM25-ish
+/// rank for `pg_ask.recall`. 1.0 = pure vector, 0.0 = pure FTS. Default
+/// 0.7 leans on the embedding while keeping keyword anchors honest.
+pub static MEMORY_SEARCH_ALPHA: GucSetting<f64> = GucSetting::<f64>::new(0.7);
+
+/// Global kill-switch for the memory layer. When `false`, the `recall`
+/// tool is not registered and the memory.* SQL surface returns an error.
+/// Honours the pgvector-absent case too: the layer is functionally off
+/// regardless of this flag if `_memories` does not exist.
+pub static MEMORY_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
+
 // ---------- Snapshot ----------
 
 /// Immutable view of all settings relevant to a single agent run.
@@ -66,6 +93,16 @@ pub struct RuntimeConfig {
     #[allow(dead_code)]
     pub trace_enabled: bool,
     pub schema_char_budget: usize,
+
+    // Embedding / memory snapshot. `embedding_*` are Options because the
+    // memory layer is optional — only `remember` / `recall` need a key.
+    pub embedding_provider: Option<String>,
+    pub embedding_api_key: Option<String>,
+    pub embedding_model: Option<String>,
+    pub embedding_base_url: Option<String>,
+    pub embedding_dimensions: usize,
+    pub memory_search_alpha: f64,
+    pub memory_enabled: bool,
 }
 
 impl RuntimeConfig {
@@ -96,6 +133,14 @@ impl RuntimeConfig {
             trace_enabled: TRACE_ENABLED.get(),
             schema_char_budget: usize::try_from(SCHEMA_CHAR_BUDGET.get().max(512))
                 .unwrap_or(16_000),
+            embedding_provider: optional_string("embedding_provider", &EMBEDDING_PROVIDER),
+            embedding_api_key: optional_string("embedding_api_key", &EMBEDDING_API_KEY),
+            embedding_model: optional_string("embedding_model", &EMBEDDING_MODEL),
+            embedding_base_url: optional_string("embedding_base_url", &EMBEDDING_BASE_URL),
+            embedding_dimensions: usize::try_from(EMBEDDING_DIMENSIONS.get().max(8))
+                .unwrap_or(1536),
+            memory_search_alpha: MEMORY_SEARCH_ALPHA.get().clamp(0.0, 1.0),
+            memory_enabled: MEMORY_ENABLED.get(),
         })
     }
 }
@@ -183,6 +228,13 @@ const KNOWN_KEYS: &[&str] = &[
     "tool_max_rows",
     "trace_enabled",
     "schema_char_budget",
+    "embedding_provider",
+    "embedding_api_key",
+    "embedding_model",
+    "embedding_base_url",
+    "embedding_dimensions",
+    "memory_search_alpha",
+    "memory_enabled",
 ];
 
 fn is_known_key(key: &str) -> bool {

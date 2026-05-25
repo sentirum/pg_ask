@@ -106,6 +106,32 @@ The string GUC is registered with `GucFlags::SUPERUSER_ONLY | NO_SHOW_ALL`
 so `SHOW pg_ask.api_key` and `SELECT * FROM pg_settings` redact the value
 for non-superusers.
 
+### Layer 5b — Memory ownership (v0.3)
+
+`pg_ask._memories` carries an `owner name NOT NULL DEFAULT current_user`
+column. Every read, write, and delete in the memory layer goes through
+`WHERE owner = current_user` — the SQL itself, not just the Rust caller.
+The `recall` tool the agent sees is therefore *automatically scoped to
+the role that invoked `pg_ask.ask`*; a session as role A cannot leak
+context into a future session as role B.
+
+`pg_ask.forget(id)` returns `false` for both "unknown id" and "belongs
+to someone else". Same NotFound collapse as sessions: an attacker
+cannot probe id space for existence.
+
+Embeddings themselves are sensitive — they can leak information about
+the stored text. The `_memories.embedding` column inherits the same
+GRANT story as the rest of the table (default `PUBLIC` SELECT, gated by
+the `owner` predicate at the SQL level). Operators with stricter needs
+should `REVOKE SELECT ON pg_ask._memories FROM PUBLIC` and grant on a
+role-by-role basis; the memory functions still work because they run
+as `SECURITY INVOKER` and respect whatever you set.
+
+The embedding-provider API key lives in its **own** GUC
+(`pg_ask.embedding_api_key`), marked `SUPERUSER_ONLY | NO_SHOW_ALL`.
+This lets operators mix providers (e.g. OpenAI embeddings + Anthropic
+chat) without leaking either key between subsystems.
+
 ### Layer 6 — Audit log
 
 `pg_ask._traces` records every `ask()` / `sql()` / `preview()` /

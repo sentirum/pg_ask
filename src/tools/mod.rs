@@ -5,6 +5,7 @@
 //! caller, via SPI. Network-bound tools (web fetch, etc.) come in v0.4.
 
 pub mod describe_table;
+pub mod recall;
 pub mod sql_query;
 
 use crate::infra::config::RuntimeConfig;
@@ -35,7 +36,16 @@ pub trait Tool {
 /// to fall back to compact mode — in that case the model needs a way to
 /// pull column detail on demand. When the full schema fit in the prompt,
 /// the extra tool is omitted to keep the function-call menu tight.
-pub fn default_toolset(cfg: &RuntimeConfig, include_describe_table: bool) -> Vec<Box<dyn Tool>> {
+///
+/// `include_memory` is set when the memory layer is enabled AND functional
+/// (pgvector installed, embedding config present). The agent decides this
+/// at the top of every call so a session that disables memory mid-flight
+/// does the right thing on the next turn.
+pub fn default_toolset(
+    cfg: &RuntimeConfig,
+    include_describe_table: bool,
+    include_memory: bool,
+) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(sql_query::SqlQueryTool {
         readonly: cfg.readonly,
         max_rows: cfg.tool_max_rows,
@@ -43,6 +53,9 @@ pub fn default_toolset(cfg: &RuntimeConfig, include_describe_table: bool) -> Vec
     })];
     if include_describe_table {
         tools.push(Box::new(describe_table::DescribeTableTool));
+    }
+    if include_memory {
+        tools.push(Box::new(recall::RecallTool));
     }
     tools
 }

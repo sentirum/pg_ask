@@ -85,10 +85,24 @@ In-progress milestone. Order of attack:
       menu stays tight in the common case.
 - [x] Table-level comments (`pg_description.objsubid = 0`) folded into
       both renderers.
-- [ ] pgvector-backed long-term memory (`pg_ask.remember`, `pg_ask.recall`)
-- [ ] Hybrid search: cosine + `tsvector` BM25-ish ranking
-- [ ] Per-row metadata filters
-- [ ] Embedding provider abstraction (OpenAI, Voyage, local llama.cpp)
+- [x] pgvector-backed long-term memory: `pg_ask.remember(content, namespace,
+      metadata)`, `pg_ask.recall(query, namespace, limit_n)`,
+      `pg_ask.forget(id)`. Owner-scoped (NotFound==Unauthorized collapse),
+      namespaces, optional jsonb metadata. Runtime-detected: if pgvector is
+      not installed `_memories` is simply skipped at bootstrap and the
+      memory.* surface returns an operator-actionable error.
+- [x] Hybrid search: `alpha * cosine + (1-alpha) * (1/(1+ts_rank_cd))`,
+      blended in SQL. Default alpha = 0.7 via `pg_ask.memory_search_alpha`.
+- [x] Embedding provider abstraction: `crate::embeddings::EmbeddingProvider`
+      trait + OpenAI implementation (+ every OpenAI-compatible host via
+      `pg_ask.embedding_base_url`). Width audit (`embedding_dimensions` vs
+      actual response) surfaces misconfiguration loudly at `remember()`.
+- [x] `recall` tool exposed to the agent when pgvector + embedding config
+      are present (runtime-detected). Hard cap 25 hits.
+- [ ] Per-row metadata filters (deferred; jsonb is stored, filtering predicate
+      sugar lands with `pg_ask.recall_where(query, filter jsonb)` in v0.4).
+- [ ] Voyage + Gemini embedding providers (scaffolding ready; same
+      trait, ~50 lines each).
 
 ## v0.4 — Tooling expansion, RLS-awareness
 

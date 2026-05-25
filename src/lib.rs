@@ -29,7 +29,9 @@ use pgrx::prelude::*;
 
 mod agent;
 mod api;
+mod embeddings;
 mod infra;
+mod memory;
 mod planner;
 mod providers;
 mod schema;
@@ -173,6 +175,68 @@ pub extern "C-unwind" fn _PG_init() {
         &SCHEMA_CHAR_BUDGET,
         512,
         1_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    // ---------- Memory / embedding (v0.3) ----------
+    GucRegistry::define_string_guc(
+        c"pg_ask.embedding_provider",
+        c"Embedding provider (openai | voyage | gemini). Independent of chat provider.",
+        c"",
+        &EMBEDDING_PROVIDER,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"pg_ask.embedding_api_key",
+        c"API key for the embedding provider. Redacted in SHOW ALL.",
+        c"Kept separate from pg_ask.api_key so operators can mix providers.",
+        &EMBEDDING_API_KEY,
+        GucContext::Userset,
+        secret_flags,
+    );
+    GucRegistry::define_string_guc(
+        c"pg_ask.embedding_model",
+        c"Embedding model identifier (e.g. text-embedding-3-small).",
+        c"Provider-specific default if unset.",
+        &EMBEDDING_MODEL,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"pg_ask.embedding_base_url",
+        c"Override the embedding provider base URL (OpenAI-compatible endpoints).",
+        c"",
+        &EMBEDDING_BASE_URL,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_ask.embedding_dimensions",
+        c"Embedding vector dimensions; must match the _memories column width.",
+        c"Default 1536 (OpenAI text-embedding-3-small, Gemini text-embedding-004).",
+        &EMBEDDING_DIMENSIONS,
+        8,
+        16_384,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_float_guc(
+        c"pg_ask.memory_search_alpha",
+        c"Blend weight in [0,1]: cosine vs full-text rank for recall.",
+        c"1.0 = pure vector, 0.0 = pure full-text. Default 0.7.",
+        &MEMORY_SEARCH_ALPHA,
+        0.0,
+        1.0,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"pg_ask.memory_enabled",
+        c"Master switch for the memory layer (remember / recall / forget).",
+        c"Functionally off regardless of this flag if pgvector is not installed.",
+        &MEMORY_ENABLED,
         GucContext::Userset,
         GucFlags::default(),
     );

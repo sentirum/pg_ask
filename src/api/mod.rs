@@ -12,6 +12,7 @@
 pub mod ask;
 pub mod chat;
 pub mod config;
+pub mod memory;
 pub mod preview;
 pub mod trace;
 pub mod version;

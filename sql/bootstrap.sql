@@ -84,6 +84,56 @@ AS $$
     RETURNING id;
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Long-term memory (requires the `vector` extension).
+--
+-- We detect pgvector at install time rather than declaring a hard dependency
+-- in pg_ask.control because most deployments don't need memory and we don't
+-- want to force the operator to install pgvector for the chat / preview
+-- surface. If pgvector is missing, `_memories` is simply not created and the
+-- memory.* SQL surface returns a clean error pointing the operator at
+-- `CREATE EXTENSION vector`.
+--
+-- Embedding dimension is fixed at 1536 (OpenAI text-embedding-3-small,
+-- Gemini text-embedding-004). Operators using larger models must ALTER
+-- the column after install — see docs/SECURITY.md.
+-- ---------------------------------------------------------------------------
+DO $bootstrap_memory$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+        CREATE TABLE IF NOT EXISTS pg_ask._memories (
+            id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+            owner      name        NOT NULL DEFAULT current_user,
+            namespace  text        NOT NULL DEFAULT 'default',
+            content    text        NOT NULL,
+            metadata   jsonb       NOT NULL DEFAULT '{}'::jsonb,
+            embedding  vector(1536) NOT NULL,
+            tsv        tsvector    GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
+            created_at timestamptz NOT NULL DEFAULT now()
+        );
+        -- Ownership / namespace listing index.
+        CREATE INDEX IF NOT EXISTS _memories_owner_ns_idx
+            ON pg_ask._memories (owner, namespace, created_at DESC);
+        -- Full-text rank for the BM25-ish half of the hybrid score.
+        CREATE INDEX IF NOT EXISTS _memories_tsv_idx
+            ON pg_ask._memories USING gin (tsv);
+        -- ANN index. IVFFlat (cosine) keeps build time low and matches the
+        -- single-tenant scale most pg_ask deployments will have; operators
+        -- with millions of rows can DROP+REINDEX to HNSW after the fact.
+        BEGIN
+            CREATE INDEX IF NOT EXISTS _memories_embedding_idx
+                ON pg_ask._memories USING ivfflat (embedding vector_cosine_ops)
+                WITH (lists = 100);
+        EXCEPTION WHEN feature_not_supported THEN
+            -- Older pgvector builds without ivfflat fall back to no ANN index;
+            -- the cosine search still works, just sequentially.
+            NULL;
+        END;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON pg_ask._memories TO PUBLIC;
+    END IF;
+END
+$bootstrap_memory$;
+
 -- Lock down internals by default. Users get the public-facing functions via
 -- explicit GRANT in their setup script. _traces stays readable so operators
 -- can audit without extra grants; the writer above is the only INSERT path.
@@ -91,3 +141,18 @@ REVOKE ALL ON ALL TABLES IN SCHEMA pg_ask FROM PUBLIC;
 GRANT  SELECT  ON pg_ask._traces TO PUBLIC;
 REVOKE ALL ON FUNCTION pg_ask._write_trace(jsonb) FROM PUBLIC;
 GRANT  EXECUTE ON FUNCTION pg_ask._write_trace(jsonb) TO PUBLIC;
+
+-- Memory-table grants must be re-applied AFTER the blanket REVOKE above so
+-- ownership-checked memory.* functions can read/write on behalf of the caller.
+-- (The `WHERE owner = current_user` clause in every query is what actually
+-- prevents cross-tenant access; the GRANT is just "PostgreSQL, please let
+-- the row-level predicate decide".)
+DO $memory_grants$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_class
+                WHERE relnamespace = 'pg_ask'::regnamespace
+                  AND relname = '_memories') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON pg_ask._memories TO PUBLIC';
+    END IF;
+END
+$memory_grants$;
