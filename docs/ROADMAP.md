@@ -64,20 +64,31 @@ In-progress milestone. Order of attack:
 - [x] `pg_ask._sessions.owner name NOT NULL DEFAULT current_user`. Existence
       and unauthorized access collapse to the same error so id-space
       probing leaks no information.
+- [x] Gemini provider (generateContent v1beta) — systemInstruction +
+      `contents[].parts[]` shape, `role: "user"|"model"`, function calls
+      via `functionCall` / `functionResponse` parts. Round-trips function
+      name in our canonical `tool_call_id` since Gemini matches by name,
+      not id. Aliases: `gemini`, `google`, `google-genai`.
 - [ ] Per-call config overrides as `jsonb` (deferred; current GUC layer
       already covers session-scoped overrides via `SET LOCAL`).
-- [ ] Gemini provider.
 
 ## v0.3 — Memory, retrieval, token budget
 
+- [x] **Token-budget schema rendering**: when full schema exceeds budget,
+      drop to tables-only listing + expose `describe_table` tool.
+      Configurable via `pg_ask.schema_char_budget` (default 16 000 chars,
+      ~4000 tokens). Implemented as a two-mode renderer (`Full` / `Compact`)
+      so the prompt-tuning surface stays one file.
+- [x] `describe_table` tool: fetches columns for a single table via
+      `has_table_privilege`-filtered `pg_catalog` query. Surfaced only
+      when the renderer falls back to compact mode so the function-call
+      menu stays tight in the common case.
+- [x] Table-level comments (`pg_description.objsubid = 0`) folded into
+      both renderers.
 - [ ] pgvector-backed long-term memory (`pg_ask.remember`, `pg_ask.recall`)
 - [ ] Hybrid search: cosine + `tsvector` BM25-ish ranking
 - [ ] Per-row metadata filters
 - [ ] Embedding provider abstraction (OpenAI, Voyage, local llama.cpp)
-- [ ] **Token-budget schema rendering**: when full schema exceeds budget,
-      drop to tables-only listing + offer `describe_table` tool. Configurable
-      via `pg_ask.schema_token_budget` (default 4000 tokens).
-- [ ] Table-level comments (`pg_description.objsubid = 0`) in schema render.
 
 ## v0.4 — Tooling expansion, RLS-awareness
 

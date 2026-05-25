@@ -7,8 +7,8 @@
 use crate::infra::errors::Result;
 use pgrx::prelude::*;
 
-/// Reserved for the schema-summary cache in v0.3.
-#[allow(dead_code)]
+/// (schema, table) pair used as a hash key when joining columns with
+/// table-level metadata (comments, sizes).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TableKey {
     pub schema: String,
@@ -54,6 +54,87 @@ pub fn fetch_columns() -> Result<Vec<ColumnRow>> {
     Spi::connect(|client| -> Result<()> {
         let rows = client.select(SCHEMA_QUERY, None, &[])?;
 
+        for row in rows {
+            out.push(ColumnRow {
+                schema: text_at(&row, 1).unwrap_or_default(),
+                table: text_at(&row, 2).unwrap_or_default(),
+                column: text_at(&row, 3).unwrap_or_default(),
+                data_type: text_at(&row, 4).unwrap_or_default(),
+                not_null: bool_at(&row, 5).unwrap_or(false),
+                comment: text_at(&row, 6).unwrap_or_default(),
+            });
+        }
+        Ok(())
+    })?;
+
+    Ok(out)
+}
+
+const TABLE_COMMENT_QUERY: &str = r#"
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    d.description AS comment
+FROM pg_catalog.pg_description d
+JOIN pg_catalog.pg_class     c ON c.oid = d.objoid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE d.objsubid = 0
+  AND c.relkind IN ('r','v','m','p','f')
+  AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+  AND n.nspname NOT LIKE 'pg\_temp\_%'
+  AND n.nspname NOT LIKE 'pg\_toast\_temp\_%'
+  AND NOT (n.nspname = 'pg_ask')
+"#;
+
+/// Fetch table-level COMMENT ON TABLE values (objsubid = 0). Returned as a
+/// flat list of (TableKey, comment) pairs; callers can fold into a map.
+pub fn fetch_table_comments() -> Result<Vec<(TableKey, String)>> {
+    let mut out: Vec<(TableKey, String)> = Vec::new();
+    Spi::connect(|client| -> Result<()> {
+        let rows = client.select(TABLE_COMMENT_QUERY, None, &[])?;
+        for row in rows {
+            let schema = text_at(&row, 1).unwrap_or_default();
+            let table = text_at(&row, 2).unwrap_or_default();
+            let comment = text_at(&row, 3).unwrap_or_default();
+            if !schema.is_empty() && !table.is_empty() && !comment.is_empty() {
+                out.push((TableKey { schema, table }, comment));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// Fetch the column rows for a single fully-qualified table. Used by
+/// `describe_table`. Returns an empty vec if the table is not visible to
+/// the caller (RLS / privileges / non-existent) — we never echo back
+/// whether the table exists.
+pub fn fetch_columns_for(schema: &str, table: &str) -> Result<Vec<ColumnRow>> {
+    let mut out: Vec<ColumnRow> = Vec::new();
+
+    Spi::connect(|client| -> Result<()> {
+        let query = r#"
+SELECT
+    n.nspname              AS schema_name,
+    c.relname              AS table_name,
+    a.attname              AS column_name,
+    pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+    a.attnotnull           AS not_null,
+    COALESCE(d.description, '') AS comment
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class     c ON c.oid = a.attrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_description d
+       ON d.objoid = c.oid AND d.objsubid = a.attnum
+WHERE a.attnum > 0
+  AND NOT a.attisdropped
+  AND c.relkind IN ('r','v','m','p','f')
+  AND n.nspname = $1
+  AND c.relname = $2
+  AND has_table_privilege(c.oid, 'SELECT')
+ORDER BY a.attnum
+"#;
+        let rows = client.select(query, None, &[schema.into(), table.into()])?;
         for row in rows {
             out.push(ColumnRow {
                 schema: text_at(&row, 1).unwrap_or_default(),

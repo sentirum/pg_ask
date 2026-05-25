@@ -82,21 +82,21 @@ src/
     mod.rs                   # Provider trait + ProviderResponse + factory
     anthropic.rs             # Anthropic Messages API
     openai.rs                # OpenAI Chat Completions + every compat host
-    gemini.rs                # v0.2 (todo)
+    gemini.rs                # Google Gemini generateContent v1beta
     wire.rs                  # canonical Message / ToolCall types
   tools/
     mod.rs                   # Tool trait + default_toolset
     sql_query.rs             # SPI executor (uses sql_guard)
-    describe_table.rs        # v0.3
+    describe_table.rs        # per-table pg_catalog lookup (compact-schema mode)
     http_fetch.rs            # v0.4
   sql_guard/
     mod.rs                   # validate(sql, mode) -> Result<ValidatedSql>
     lexer.rs                 # tokenization
     rules.rs                 # SELECT-only, deny-list, multi-statement check
   schema/
-    mod.rs                   # summarize(budget) -> SchemaSummary
-    introspect.rs            # pg_catalog queries
-    render.rs                # compact text rendering
+    mod.rs                   # summarize_within(budget) -> (text, mode)
+    introspect.rs            # pg_catalog queries (full / per-table / table comments)
+    render.rs                # full + compact text renderers
   session/
     mod.rs                   # create / load_history / append / clear
     store.rs                 # SPI primitives (parameterised; owner check)
@@ -194,6 +194,7 @@ Known keys:
 | `pg_ask.tool_statement_timeout_ms` | int   | `10000`              | GUC → table     |
 | `pg_ask.tool_max_rows`           | int     | `200`                | GUC → table     |
 | `pg_ask.trace_enabled`           | bool    | `true`               | GUC → table     |
+| `pg_ask.schema_char_budget`      | int     | `16000`              | GUC → table     |
 
 API keys are marked with `GucFlags::SUPERUSER_ONLY | NO_SHOW_ALL` so
 `SHOW ALL` and `pg_settings` don't leak them to ordinary roles.

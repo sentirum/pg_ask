@@ -33,6 +33,15 @@ pub static TOOL_STATEMENT_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(1
 pub static TOOL_MAX_ROWS: GucSetting<i32> = GucSetting::<i32>::new(200);
 pub static TRACE_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
+/// Soft cap on the schema dump injected into the system prompt, measured
+/// in characters (a rough proxy for tokens at ~4 chars/token).
+///
+/// When the full schema render exceeds this, `schema::summarize` falls
+/// back to a tables-only listing and exposes the `describe_table` tool so
+/// the model can pull column detail on demand. Keeps the prompt cheap on
+/// real-world (hundreds-of-tables) databases.
+pub static SCHEMA_CHAR_BUDGET: GucSetting<i32> = GucSetting::<i32>::new(16_000);
+
 // ---------- Snapshot ----------
 
 /// Immutable view of all settings relevant to a single agent run.
@@ -56,6 +65,7 @@ pub struct RuntimeConfig {
     /// Picked up by the telemetry writer (no-op until v0.2).
     #[allow(dead_code)]
     pub trace_enabled: bool,
+    pub schema_char_budget: usize,
 }
 
 impl RuntimeConfig {
@@ -84,6 +94,8 @@ impl RuntimeConfig {
             )?,
             tool_max_rows: usize::try_from(TOOL_MAX_ROWS.get().max(1)).unwrap_or(200),
             trace_enabled: TRACE_ENABLED.get(),
+            schema_char_budget: usize::try_from(SCHEMA_CHAR_BUDGET.get().max(512))
+                .unwrap_or(16_000),
         })
     }
 }
@@ -170,6 +182,7 @@ const KNOWN_KEYS: &[&str] = &[
     "tool_statement_timeout_ms",
     "tool_max_rows",
     "trace_enabled",
+    "schema_char_budget",
 ];
 
 fn is_known_key(key: &str) -> bool {

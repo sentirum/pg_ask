@@ -159,13 +159,23 @@ pub extern "C-unwind" fn _PG_init() {
     );
     GucRegistry::define_bool_guc(
         c"pg_ask.trace_enabled",
-        c"Write a row to pg_ask._traces for every ask() / chat() call (v0.2)",
+        c"Write a row to pg_ask._traces for every ask() / chat() call",
         c"",
         &TRACE_ENABLED,
         GucContext::Userset,
         GucFlags::default(),
     );
-
+    GucRegistry::define_int_guc(
+        c"pg_ask.schema_char_budget",
+        c"Soft cap on schema dump injected into the system prompt (characters).",
+        c"When the full render exceeds this, falls back to a tables-only listing \
+          and exposes describe_table for on-demand column detail.",
+        &SCHEMA_CHAR_BUDGET,
+        512,
+        1_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 // ---------- Tests ----------

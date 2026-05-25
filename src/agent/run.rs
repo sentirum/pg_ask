@@ -11,7 +11,7 @@ use crate::infra::http::HttpClient;
 use crate::providers::{
     self, Message, MessageContent, ProviderResponse, Role, ToolSpec,
 };
-use crate::schema;
+use crate::schema::{self, SchemaMode};
 use crate::telemetry::ToolCallTrace;
 use crate::tools::{self, Tool};
 use pgrx::prelude::*;
@@ -56,11 +56,15 @@ pub fn run_with_history(
     let http = HttpClient::new(cfg.http_connect_timeout_ms, cfg.http_total_timeout_ms);
     let provider = providers::build(&cfg, http)?;
 
-    let schema_summary = schema::summarize()?;
+    let schema_summary = schema::summarize_within(cfg.schema_char_budget)?;
     let system_prompt = prompt::build(&schema_summary.text, mode, cfg.readonly);
 
+    // When the schema render went compact we expose describe_table so the
+    // model can pull column detail on demand. In Full mode the menu stays
+    // minimal (just sql_query) to keep tool-routing cheap.
+    let need_describe = matches!(schema_summary.mode, SchemaMode::Compact);
     let tools_vec: Vec<Box<dyn Tool>> = match mode {
-        AgentMode::Execute => tools::default_toolset(&cfg),
+        AgentMode::Execute => tools::default_toolset(&cfg, need_describe),
         AgentMode::GenerateOnly => Vec::new(),
     };
     let specs: Vec<ToolSpec> = tools_vec.iter().map(|t| t.spec()).collect();

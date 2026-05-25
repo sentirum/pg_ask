@@ -11,6 +11,7 @@
 //! through the OpenAI provider by overriding `base_url`.
 
 pub mod anthropic;
+pub mod gemini;
 pub mod openai;
 pub mod wire;
 
@@ -38,6 +39,10 @@ pub fn build(cfg: &RuntimeConfig, http: HttpClient) -> Result<Box<dyn Provider>>
     let key = cfg.provider.trim().to_ascii_lowercase();
     match key.as_str() {
         "anthropic" | "claude" => Ok(Box::new(anthropic::AnthropicProvider::new(cfg, http))),
+
+        "gemini" | "google" | "google-genai" => {
+            Ok(Box::new(gemini::GeminiProvider::new(cfg, http)))
+        }
 
         // The OpenAI provider also handles every OpenAI-compatible
         // endpoint when `pg_ask.base_url` is set. Aliases let users pick a

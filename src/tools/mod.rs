@@ -4,6 +4,7 @@
 //! turns. They run **inside the same PG backend and transaction** as the
 //! caller, via SPI. Network-bound tools (web fetch, etc.) come in v0.4.
 
+pub mod describe_table;
 pub mod sql_query;
 
 use crate::infra::config::RuntimeConfig;
@@ -29,10 +30,19 @@ pub trait Tool {
 ///
 /// The runtime config drives every per-tool knob (readonly, row cap,
 /// statement timeout) so tools never read globals themselves.
-pub fn default_toolset(cfg: &RuntimeConfig) -> Vec<Box<dyn Tool>> {
-    vec![Box::new(sql_query::SqlQueryTool {
+///
+/// `include_describe_table` is set by the agent when the schema render had
+/// to fall back to compact mode — in that case the model needs a way to
+/// pull column detail on demand. When the full schema fit in the prompt,
+/// the extra tool is omitted to keep the function-call menu tight.
+pub fn default_toolset(cfg: &RuntimeConfig, include_describe_table: bool) -> Vec<Box<dyn Tool>> {
+    let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(sql_query::SqlQueryTool {
         readonly: cfg.readonly,
         max_rows: cfg.tool_max_rows,
         statement_timeout_ms: cfg.tool_statement_timeout_ms,
-    })]
+    })];
+    if include_describe_table {
+        tools.push(Box::new(describe_table::DescribeTableTool));
+    }
+    tools
 }

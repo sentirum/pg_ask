@@ -2,8 +2,14 @@
 //!
 //! Kept deliberately small. Operator-visible behaviour (which sentences the
 //! model sees) lives here so prompt tuning is one file diff away.
+//!
+//! The schema text is whatever `schema::summarize_within` produced. When it
+//! starts with the compact-mode marker we add one extra sentence so the
+//! model knows it can pull column detail via the `describe_table` tool.
 
 use super::run::AgentMode;
+
+const COMPACT_MARKER: &str = "TABLES (use describe_table for columns):";
 
 pub fn build(schema_text: &str, mode: AgentMode, readonly: bool) -> String {
     let mut s = String::new();
@@ -35,6 +41,14 @@ pub fn build(schema_text: &str, mode: AgentMode, readonly: bool) -> String {
                  answers the question. Output only the SQL, no prose, no fences.\n",
             );
         }
+    }
+
+    if schema_text.starts_with(COMPACT_MARKER) && matches!(mode, AgentMode::Execute) {
+        s.push_str(
+            "\nNOTE: The schema below is a tables-only listing because the full \
+             schema is too large for the prompt. Call `describe_table` whenever \
+             you need to know what columns a specific table has \u{2014} do not guess.\n",
+        );
     }
 
     s.push_str("\n=== DATABASE SCHEMA ===\n");

@@ -54,6 +54,7 @@ pub fn with_trace<T>(
                 tool_statement_timeout_ms: 0,
                 tool_max_rows: 0,
                 trace_enabled: true,
+                schema_char_budget: 0,
             },
             question,
         ),
