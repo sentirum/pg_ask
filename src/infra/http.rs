@@ -6,11 +6,21 @@
 //! a hung HTTP call holds locks and stops cooperative cancellation from
 //! kicking in until we return).
 //!
-//! Built per request (cheap — `ureq::Agent` is an `Arc` internally) so timeout
-//! changes via GUC take effect immediately.
+//! P4 (v0.5.2 review): we keep a process-level cache of `ureq::Agent`s
+//! keyed on (connect_timeout, total_timeout, redirects). `ureq::Agent`
+//! is internally an `Arc` so cloning is free, but each fresh
+//! `AgentBuilder::build()` allocates a new connection pool — with a
+//! tight agent loop hitting the same provider, the previous behaviour
+//! re-resolved DNS and re-handshook TLS for every call. The cache
+//! makes the pool persistent for the lifetime of the backend.
+//!
+//! `max_body_bytes` is NOT part of the cache key: it's a Rust-side
+//! cap applied after the agent has handed us a reader, so two clients
+//! with different caps can safely share the same Agent.
 
 use crate::infra::errors::{AskError, Result};
 use std::io::Read;
+use std::sync::Mutex;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -43,11 +53,7 @@ impl HttpClient {
         max_body_bytes: usize,
         follow_redirects: bool,
     ) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_millis(connect_timeout_ms))
-            .timeout(Duration::from_millis(total_timeout_ms))
-            .redirects(if follow_redirects { 5 } else { 0 })
-            .build();
+        let agent = shared_agent(connect_timeout_ms, total_timeout_ms, follow_redirects);
         Self {
             agent,
             max_body_bytes,
@@ -121,6 +127,34 @@ impl HttpClient {
         let body = read_capped(resp.into_reader(), self.max_body_bytes);
         serde_json::from_str::<T>(&body).map_err(|e| AskError::Transport(e.to_string()))
     }
+}
+
+/// Process-level Agent cache. Each Postgres backend is its own process
+/// (Postgres forks per connection), so the cache is per-backend in
+/// practice. The key is `(connect_ms, total_ms, follow_redirects)`;
+/// every distinct combination gets its own pool, but in the typical
+/// pg_ask deployment there are at most two entries: one for providers
+/// (follow redirects) and one for `http_fetch` (no redirects).
+fn shared_agent(
+    connect_timeout_ms: u64,
+    total_timeout_ms: u64,
+    follow_redirects: bool,
+) -> ureq::Agent {
+    type Key = (u64, u64, bool);
+    static POOL: Mutex<Vec<(Key, ureq::Agent)>> = Mutex::new(Vec::new());
+
+    let key: Key = (connect_timeout_ms, total_timeout_ms, follow_redirects);
+    let mut pool = POOL.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((_, agent)) = pool.iter().find(|(k, _)| *k == key) {
+        return agent.clone();
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(connect_timeout_ms))
+        .timeout(Duration::from_millis(total_timeout_ms))
+        .redirects(if follow_redirects { 5 } else { 0 })
+        .build();
+    pool.push((key, agent.clone()));
+    agent
 }
 
 /// Read up to `max` bytes from `r`, decode as UTF-8 lossily, and return.

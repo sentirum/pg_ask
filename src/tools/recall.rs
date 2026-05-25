@@ -10,6 +10,7 @@
 //! provider's function-calling pipeline.
 
 use super::{Tool, ToolOutput};
+use crate::infra::config::RuntimeConfig;
 use crate::infra::errors::Result;
 use crate::memory;
 use crate::providers::ToolSpec;
@@ -22,7 +23,12 @@ const DEFAULT_LIMIT: usize = 5;
 /// Hard ceiling regardless of what the model asks for.
 const MAX_LIMIT: usize = 25;
 
-pub struct RecallTool;
+/// Recall tool. Holds a snapshot of the runtime config so each
+/// `invoke()` call doesn't re-read the GUCs + `_config` table. P1
+/// (v0.5.2 review).
+pub struct RecallTool {
+    pub cfg: RuntimeConfig,
+}
 
 impl Tool for RecallTool {
     fn spec(&self) -> ToolSpec {
@@ -64,7 +70,7 @@ impl Tool for RecallTool {
             .map(|n| (n as usize).clamp(1, MAX_LIMIT))
             .unwrap_or(DEFAULT_LIMIT);
 
-        let hits = match memory::recall(query, namespace, limit) {
+        let hits = match memory::recall_with_cfg(&self.cfg, query, namespace, limit) {
             Ok(h) => h,
             Err(e) => return Ok(err(&format!("recall failed: {e}"))),
         };

@@ -175,6 +175,25 @@ fn message_to_wire(msg: &Message) -> Option<Value> {
 /// `tool_call_id`. The other providers issue ids like "call_abc123" or
 /// "toolu_01XYZ" that don't carry the function name; we attach the name to
 /// the id in `parse_response` below so this round-trip works.
+///
+/// ## P8 (v0.5.2 review): id format is provider-locked
+///
+/// The `"<name>::<id>"` shape is an internal contract between
+/// `parse_response` (which produces the id) and this function (which
+/// consumes it). It is **only** valid for tool calls that originated
+/// from a Gemini response in the same agent loop iteration. Two
+/// consequences operators should be aware of:
+///
+///   * **Do not** pass a foreign `tool_call_id` (e.g. one captured
+///     from an OpenAI session log) into `ask.chat()` history when
+///     switching providers mid-conversation. The Gemini path will
+///     fail open by attributing the response to `sql_query`, which
+///     can confuse the model.
+///   * The fallback to `"sql_query"` is a v0.2-era safety net. If we
+///     ever expose tool-call replay, the right fix is to refuse
+///     unparseable ids outright and surface the conflict to the
+///     caller — silently rewriting the function name hides real
+///     bugs. Tracked in the v0.5.2 review as P8.
 fn extract_function_name(tool_call_id: &str) -> String {
     // We stash `"<name>::<id>"` in tool_call_id below; strip the suffix.
     match tool_call_id.split_once("::") {

@@ -43,11 +43,35 @@ pub struct Hit {
 /// Detect whether pgvector is installed in the current database. Used by
 /// the memory entry points so we can fail fast with an operator-friendly
 /// message instead of bouncing off a missing type / table.
+///
+/// P3 (v0.5.2 review): the agent loop runs this on every iteration to
+/// decide whether to include the recall tool. Each call is a fresh SPI
+/// round-trip into pg_extension; in a tight agent loop that's pure
+/// waste because pgvector can't be uninstalled inside a transaction
+/// (DROP EXTENSION takes AccessExclusiveLock and the agent is itself
+/// holding the connection open). We memoize a `true` answer for the
+/// lifetime of the backend.
+///
+/// We deliberately do NOT memoize a `false` answer: the operator may
+/// `CREATE EXTENSION vector;` mid-session and then call recall, and
+/// caching `false` would force them to reconnect for the change to
+/// take effect. The probe is cheap (single pg_catalog hit), and the
+/// expected steady state once memory is in use is `true` — which IS
+/// cached.
 pub fn pgvector_installed() -> Result<bool> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.load(Ordering::Relaxed) {
+        return Ok(true);
+    }
     let found: Option<bool> = Spi::get_one(
         "SELECT TRUE FROM pg_extension WHERE extname = 'vector'",
     )?;
-    Ok(found.unwrap_or(false))
+    let v = found.unwrap_or(false);
+    if v {
+        INSTALLED.store(true, Ordering::Relaxed);
+    }
+    Ok(v)
 }
 
 pub fn insert(
@@ -121,8 +145,15 @@ pub fn list_memories(
 
     // The optional namespace filter is folded into SQL via a NULL trick
     // so we keep one prepared shape regardless of caller intent.
+    //
+    // P6 (v0.5.2 review): `id` is selected as its native `uuid` type,
+    // not `::text`. pgrx decodes it directly into [`pgrx::Uuid`] via
+    // the postgres binary representation — strictly fewer allocations
+    // than the previous round-trip through a 36-char hyphenated
+    // string + manual hex parser. Same applies to `hybrid_search`
+    // below.
     let query = "
-        SELECT id::text,
+        SELECT id,
                namespace,
                content,
                metadata::text,
@@ -146,11 +177,14 @@ pub fn list_memories(
             ],
         )?;
         for row in rows {
-            let id_text: String = row
+            let id: Uuid = match row
                 .get_datum_by_ordinal(1)
                 .ok()
-                .and_then(|d| d.value::<String>().ok().flatten())
-                .unwrap_or_default();
+                .and_then(|d| d.value::<Uuid>().ok().flatten())
+            {
+                Some(u) => u,
+                None => continue, // null id shouldn't happen (PK), but stay defensive
+            };
             let ns: String = row
                 .get_datum_by_ordinal(2)
                 .ok()
@@ -172,10 +206,6 @@ pub fn list_memories(
                 .and_then(|d| d.value::<String>().ok().flatten())
                 .unwrap_or_default();
 
-            let id = match parse_uuid(&id_text) {
-                Some(u) => u,
-                None => continue,
-            };
             let metadata: Value =
                 serde_json::from_str(&metadata_text).unwrap_or(Value::Null);
             out.push(MemoryRow {
@@ -261,7 +291,7 @@ pub fn hybrid_search(
              ORDER BY m.embedding <=> (SELECT vec FROM q)
              LIMIT GREATEST($5::int * 5, 50)
         )
-        SELECT c.id::text,
+        SELECT c.id,
                c.content,
                c.metadata::text,
                (
@@ -287,11 +317,15 @@ pub fn hybrid_search(
             ],
         )?;
         for row in rows {
-            let id_text: String = row
+            // P6 (v0.5.2 review): native uuid decode, no ::text + parse.
+            let id: Uuid = match row
                 .get_datum_by_ordinal(1)
                 .ok()
-                .and_then(|d| d.value::<String>().ok().flatten())
-                .unwrap_or_default();
+                .and_then(|d| d.value::<Uuid>().ok().flatten())
+            {
+                Some(u) => u,
+                None => continue,
+            };
             let content: String = row
                 .get_datum_by_ordinal(2)
                 .ok()
@@ -307,11 +341,6 @@ pub fn hybrid_search(
                 .ok()
                 .and_then(|d| d.value::<f64>().ok().flatten())
                 .unwrap_or(0.0);
-
-            let id = match parse_uuid(&id_text) {
-                Some(u) => u,
-                None => continue,
-            };
             let metadata: Value =
                 serde_json::from_str(&metadata_text).unwrap_or_else(|_| Value::Null);
             out.push(Hit {
@@ -347,23 +376,11 @@ fn encode_vector(values: &[f32]) -> String {
     out
 }
 
-/// pgrx's `Uuid` constructor we use here. We round-trip via text because
-/// `SELECT m.id` natively comes back as `Uuid`, but we requested `::text`
-/// above to keep the row decoder simple. Cheap (UUIDs are 36 chars).
-fn parse_uuid(s: &str) -> Option<Uuid> {
-    // pgrx::Uuid wraps a [u8; 16]; the easiest parse path is via the
-    // standard hex format used by Postgres.
-    let cleaned: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
-    if cleaned.len() != 32 {
-        return None;
-    }
-    let mut bytes = [0u8; 16];
-    for i in 0..16 {
-        let byte = u8::from_str_radix(&cleaned[i * 2..i * 2 + 2], 16).ok()?;
-        bytes[i] = byte;
-    }
-    Some(Uuid::from_bytes(bytes))
-}
+// P6 (v0.5.2 review): the previous `parse_uuid` helper plus a manual
+// hex parser is gone — every callsite now `SELECT id` (native uuid)
+// and pulls the column with `.value::<Uuid>()`. The hex parser was
+// only ever exercised against well-formed Postgres uuids and added
+// allocation + cleanup that pgrx already does natively.
 
 #[cfg(test)]
 mod tests {
@@ -388,18 +405,4 @@ mod tests {
         assert_eq!(stripped.split(',').count(), 3);
     }
 
-    #[test]
-    fn parse_uuid_accepts_hyphenated_form() {
-        let s = "550e8400-e29b-41d4-a716-446655440000";
-        let u = parse_uuid(s).expect("valid uuid");
-        let bytes = u.as_bytes();
-        assert_eq!(bytes[0], 0x55);
-        assert_eq!(bytes[15], 0x00);
-    }
-
-    #[test]
-    fn parse_uuid_rejects_short_input() {
-        assert!(parse_uuid("not-a-uuid").is_none());
-        assert!(parse_uuid("").is_none());
-    }
 }

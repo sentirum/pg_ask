@@ -31,9 +31,9 @@ fn create_session(label: Option<String>) -> Uuid {
 /// reconstructed history, persist the new turns, and return the final text.
 #[pg_extern(schema = "ask", volatile, parallel_unsafe)]
 fn chat(session_id: Uuid, message: &str) -> String {
-    let result = with_trace(TraceKind::Chat, message, |rec| {
+    let result = with_trace(TraceKind::Chat, message, |cfg, rec| {
         let prior = session::load_history(session_id)?;
-        let outcome = agent::run_with_history(message, prior, AgentMode::Execute)?;
+        let outcome = agent::run_with_cfg(cfg, message, prior, AgentMode::Execute)?;
 
         rec.iterations = outcome.iterations;
         rec.tool_calls = outcome.tool_calls.clone();

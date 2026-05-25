@@ -40,21 +40,45 @@ pub struct AgentOutcome {
 }
 
 /// Single-shot entry: no prior conversation, no persistence.
+///
+/// Loads the runtime config itself — use [`run_with_cfg`] when the
+/// caller already has a snapshot (the `api::*` entry points all do via
+/// [`crate::api::trace::with_trace`]). Kept as a convenience for
+/// background workers / tests that don't go through `with_trace`.
+#[allow(dead_code)]
 pub fn run(question: &str, mode: AgentMode) -> Result<AgentOutcome> {
-    run_with_history(question, Vec::new(), mode)
+    let cfg = RuntimeConfig::load()?;
+    run_with_cfg(&cfg, question, Vec::new(), mode)
 }
 
 /// Resume a conversation: `history` is the persisted turn list, `question`
 /// is the new user message appended to it. The caller is responsible for
-/// persisting the resulting turns (api::chat does this).
+/// persisting the resulting turns (api::chat does this). The public
+/// `ask.chat` SQL surface goes through `run_with_cfg` directly; this
+/// remains as the same-signature convenience for non-API callers.
+#[allow(dead_code)]
 pub fn run_with_history(
     question: &str,
     prior_history: Vec<Message>,
     mode: AgentMode,
 ) -> Result<AgentOutcome> {
     let cfg = RuntimeConfig::load()?;
+    run_with_cfg(&cfg, question, prior_history, mode)
+}
+
+/// Variant that uses a pre-loaded snapshot. P1 (v0.5.2 review): every
+/// `ask()` invocation used to call `RuntimeConfig::load` 2–3 times
+/// (`with_trace` + `agent::run` + the first memory tool); the API
+/// layer now loads once via `with_trace` and threads the snapshot
+/// through here.
+pub fn run_with_cfg(
+    cfg: &RuntimeConfig,
+    question: &str,
+    prior_history: Vec<Message>,
+    mode: AgentMode,
+) -> Result<AgentOutcome> {
     let http = HttpClient::new(cfg.http_connect_timeout_ms, cfg.http_total_timeout_ms);
-    let provider = providers::build(&cfg, http.clone())?;
+    let provider = providers::build(cfg, http.clone())?;
 
     let schema_summary = schema::summarize_within(cfg.schema_char_budget)?;
     let system_prompt = prompt::build(&schema_summary.text, mode, cfg.readonly);
@@ -75,7 +99,7 @@ pub fn run_with_history(
 
     let tools_vec: Vec<Box<dyn Tool>> = match mode {
         AgentMode::Execute => {
-            tools::default_toolset(&cfg, need_describe, memory_ready, http.clone())
+            tools::default_toolset(cfg, need_describe, memory_ready, http.clone())
         }
         AgentMode::GenerateOnly => Vec::new(),
     };

@@ -64,7 +64,7 @@ pub fn default_toolset(
         tools.push(Box::new(describe_table::DescribeTableTool));
     }
     if include_memory {
-        tools.push(Box::new(recall::RecallTool));
+        tools.push(Box::new(recall::RecallTool { cfg: cfg.clone() }));
     }
     if cfg.allow_http {
         // We deliberately do NOT reuse the provider HttpClient here:

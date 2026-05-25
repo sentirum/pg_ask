@@ -37,10 +37,20 @@ pub fn remember(
     metadata: Option<Value>,
 ) -> Result<Uuid> {
     let cfg = RuntimeConfig::load()?;
-    ensure_memory_available(&cfg)?;
+    remember_with_cfg(&cfg, content, namespace, metadata)
+}
+
+/// Variant that uses a pre-loaded snapshot (P1, v0.5.2 review).
+pub fn remember_with_cfg(
+    cfg: &RuntimeConfig,
+    content: &str,
+    namespace: Option<&str>,
+    metadata: Option<Value>,
+) -> Result<Uuid> {
+    ensure_memory_available(cfg)?;
 
     let http = HttpClient::new(cfg.http_connect_timeout_ms, cfg.http_total_timeout_ms);
-    let provider = embeddings::build(&cfg, http)?;
+    let provider = embeddings::build(cfg, http)?;
 
     let embedding = provider
         .embed(&[content])?
@@ -65,10 +75,20 @@ pub fn recall(
     limit: usize,
 ) -> Result<Vec<Hit>> {
     let cfg = RuntimeConfig::load()?;
-    ensure_memory_available(&cfg)?;
+    recall_with_cfg(&cfg, query, namespace, limit)
+}
+
+/// Variant that uses a pre-loaded snapshot (P1, v0.5.2 review).
+pub fn recall_with_cfg(
+    cfg: &RuntimeConfig,
+    query: &str,
+    namespace: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Hit>> {
+    ensure_memory_available(cfg)?;
 
     let http = HttpClient::new(cfg.http_connect_timeout_ms, cfg.http_total_timeout_ms);
-    let provider = embeddings::build(&cfg, http)?;
+    let provider = embeddings::build(cfg, http)?;
 
     let embedding = provider
         .embed(&[query])?

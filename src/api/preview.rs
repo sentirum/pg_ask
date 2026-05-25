@@ -33,8 +33,8 @@ fn preview(
         name!(warnings, Vec<String>),
     ),
 > {
-    let result = with_trace(TraceKind::Preview, question, |rec| {
-        let outcome = agent::run(question, AgentMode::GenerateOnly)?;
+    let result = with_trace(TraceKind::Preview, question, |cfg, rec| {
+        let outcome = agent::run_with_cfg(cfg, question, Vec::new(), AgentMode::GenerateOnly)?;
         rec.iterations = outcome.iterations;
         rec.tool_calls = outcome.tool_calls.clone();
         let row: PreviewRow = planner::preview(&outcome.text)?;

@@ -18,8 +18,8 @@ use pgrx::prelude::*;
 /// for the entire loop to finish.
 #[pg_extern(schema = "ask", volatile, parallel_unsafe)]
 fn ask_stream(question: &str) -> SetOfIterator<'static, String> {
-    let result = with_trace(TraceKind::Ask, question, |rec| {
-        let lines = agent::run_stream(question, AgentMode::Execute)?;
+    let result = with_trace(TraceKind::Ask, question, |cfg, rec| {
+        let lines = agent::run_stream_with_cfg(cfg, question, AgentMode::Execute)?;
         // Record the final line (if present) as the trace answer.
         if let Some(last) = lines.last() {
             rec.final_text = Some(last.clone());
@@ -37,8 +37,8 @@ fn ask_stream(question: &str) -> SetOfIterator<'static, String> {
 /// a textual answer.
 #[pg_extern(schema = "ask", volatile, parallel_unsafe)]
 fn ask(question: &str) -> String {
-    let result = with_trace(TraceKind::Ask, question, |rec| {
-        let outcome = agent::run(question, AgentMode::Execute)?;
+    let result = with_trace(TraceKind::Ask, question, |cfg, rec| {
+        let outcome = agent::run_with_cfg(cfg, question, Vec::new(), AgentMode::Execute)?;
         rec.iterations = outcome.iterations;
         rec.tool_calls = outcome.tool_calls.clone();
         rec.final_text = Some(outcome.text.clone());
@@ -54,8 +54,8 @@ fn ask(question: &str) -> String {
 /// it sees only the schema and is asked to return a single SQL statement.
 #[pg_extern(schema = "ask", volatile, parallel_unsafe)]
 fn sql(question: &str) -> String {
-    let result = with_trace(TraceKind::Sql, question, |rec| {
-        let outcome = agent::run(question, AgentMode::GenerateOnly)?;
+    let result = with_trace(TraceKind::Sql, question, |cfg, rec| {
+        let outcome = agent::run_with_cfg(cfg, question, Vec::new(), AgentMode::GenerateOnly)?;
         rec.iterations = outcome.iterations;
         rec.tool_calls = outcome.tool_calls.clone();
         rec.final_text = Some(outcome.text.clone());

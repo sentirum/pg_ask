@@ -9,7 +9,7 @@
 //! Rust side never has to know the column order — schema changes in
 //! `bootstrap.sql` don't ripple here.
 
-use crate::infra::config::{RuntimeConfig, TRACE_ENABLED};
+use crate::infra::config::RuntimeConfig;
 use crate::providers::ToolCall;
 use pgrx::prelude::*;
 use serde::Serialize;
@@ -70,6 +70,17 @@ impl ToolCallTrace {
 }
 
 /// Mutable accumulator the agent loop fills as it runs.
+///
+/// P5 (v0.5.2 review): `trace_enabled` is snapshotted from the
+/// `RuntimeConfig` at `start()` time and consulted at `write()` time
+/// from the record itself — not from the live GUC. This keeps the
+/// row consistent with the rest of the call: with the previous code,
+/// a `SET LOCAL pg_ask.trace_enabled = off` issued by a tool mid-call
+/// would suppress the trace even though everything else in the call
+/// used the original snapshot, and a `SET ... = on` could conjure a
+/// row for a call where every other component thought tracing was
+/// off. Tying it to the cfg snapshot makes the on/off decision
+/// transactional with the rest of the runtime view.
 #[derive(Debug)]
 pub struct TraceRecord {
     pub kind: TraceKind,
@@ -81,6 +92,9 @@ pub struct TraceRecord {
     pub model: Option<String>,
     pub started: Instant,
     pub error: Option<String>,
+    /// Snapshot of `cfg.trace_enabled` taken when `with_trace` loaded
+    /// the runtime config. See type-level comment for rationale.
+    trace_enabled: bool,
 }
 
 impl TraceRecord {
@@ -95,6 +109,7 @@ impl TraceRecord {
             model: cfg.model.clone(),
             started: Instant::now(),
             error: None,
+            trace_enabled: cfg.trace_enabled,
         }
     }
 
@@ -114,9 +129,10 @@ impl TraceRecord {
 }
 
 /// Write a trace row, swallowing every error so telemetry can never fail
-/// the underlying user call. Honours the `pg_ask.trace_enabled` GUC.
+/// the underlying user call. Honours the `pg_ask.trace_enabled` value
+/// captured at `TraceRecord::start` time (P5, v0.5.2 review).
 pub fn write(rec: &TraceRecord) {
-    if !TRACE_ENABLED.get() {
+    if !rec.trace_enabled {
         return;
     }
     let payload = rec.to_payload();

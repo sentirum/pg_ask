@@ -22,10 +22,28 @@ use pgrx::prelude::*;
 
 /// Run the agent loop and collect every observable event into a flat
 /// list of strings. The API layer feeds this into `SetOfIterator`.
+///
+/// Loads the runtime config itself — callers that already have a
+/// snapshot (the `api::*` entry points all do via
+/// [`crate::api::trace::with_trace`]) should use [`run_stream_with_cfg`]
+/// instead. See P1 in the v0.5.2 review. Kept as a convenience for
+/// background workers / tests that don't go through `with_trace`.
+#[allow(dead_code)]
 pub fn run_stream(question: &str, mode: AgentMode) -> Result<Vec<String>> {
     let cfg = RuntimeConfig::load()?;
+    run_stream_with_cfg(&cfg, question, mode)
+}
+
+/// Variant that uses a pre-loaded snapshot. P1 (v0.5.2 review):
+/// `with_trace` already loads the config; threading it through avoids a
+/// second GUC scan plus a second _config table fallback round-trip.
+pub fn run_stream_with_cfg(
+    cfg: &RuntimeConfig,
+    question: &str,
+    mode: AgentMode,
+) -> Result<Vec<String>> {
     let http = HttpClient::new(cfg.http_connect_timeout_ms, cfg.http_total_timeout_ms);
-    let provider = providers::build(&cfg, http.clone())?;
+    let provider = providers::build(cfg, http.clone())?;
 
     let schema_summary = schema::summarize_within(cfg.schema_char_budget)?;
     let system_prompt = prompt::build(&schema_summary.text, mode, cfg.readonly);
@@ -37,7 +55,7 @@ pub fn run_stream(question: &str, mode: AgentMode) -> Result<Vec<String>> {
 
     let tools_vec: Vec<Box<dyn Tool>> = match mode {
         AgentMode::Execute => {
-            tools::default_toolset(&cfg, need_describe, memory_ready, http.clone())
+            tools::default_toolset(cfg, need_describe, memory_ready, http.clone())
         }
         AgentMode::GenerateOnly => Vec::new(),
     };
