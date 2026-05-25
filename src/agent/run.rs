@@ -54,7 +54,7 @@ pub fn run_with_history(
 ) -> Result<AgentOutcome> {
     let cfg = RuntimeConfig::load()?;
     let http = HttpClient::new(cfg.http_connect_timeout_ms, cfg.http_total_timeout_ms);
-    let provider = providers::build(&cfg, http)?;
+    let provider = providers::build(&cfg, http.clone())?;
 
     let schema_summary = schema::summarize_within(cfg.schema_char_budget)?;
     let system_prompt = prompt::build(&schema_summary.text, mode, cfg.readonly);
@@ -74,7 +74,9 @@ pub fn run_with_history(
         && crate::memory::store::pgvector_installed().unwrap_or(false);
 
     let tools_vec: Vec<Box<dyn Tool>> = match mode {
-        AgentMode::Execute => tools::default_toolset(&cfg, need_describe, memory_ready),
+        AgentMode::Execute => {
+            tools::default_toolset(&cfg, need_describe, memory_ready, http.clone())
+        }
         AgentMode::GenerateOnly => Vec::new(),
     };
     let specs: Vec<ToolSpec> = tools_vec.iter().map(|t| t.spec()).collect();

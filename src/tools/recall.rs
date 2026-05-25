@@ -27,12 +27,12 @@ pub struct RecallTool;
 impl Tool for RecallTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "recall",
+            name: "recall".to_string(),
             description: "Search the user's long-term memory for previously stored \
                 notes, preferences, or facts relevant to a query. Use this to look \
                 up context that may not be in the current conversation — user \
                 preferences, definitions, prior conclusions. Returns up to 25 hits \
-                ranked by hybrid (vector + full-text) similarity.",
+                ranked by hybrid (vector + full-text) similarity.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

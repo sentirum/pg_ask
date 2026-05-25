@@ -48,8 +48,8 @@ pub struct ToolCall {
 /// Specification of a tool exposed to the model.
 #[derive(Debug, Clone)]
 pub struct ToolSpec {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
     /// JSON Schema for the tool input.
     pub input_schema: serde_json::Value,
 }

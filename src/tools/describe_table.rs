@@ -27,12 +27,12 @@ pub struct DescribeTableTool;
 impl Tool for DescribeTableTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "describe_table",
+            name: "describe_table".to_string(),
             description: "List the columns of a single table in the current database, \
                 with their types and any comments. Use this when the system-prompt \
                 schema is too large to include every table and you need to look up a \
                 specific one. Accepts either a fully-qualified `table` (e.g. \
-                \"public.orders\") or separate `schema` and `table` fields.",
+                \"public.orders\") or separate `schema` and `table` fields.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

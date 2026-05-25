@@ -69,6 +69,26 @@ pub static MEMORY_SEARCH_ALPHA: GucSetting<f64> = GucSetting::<f64>::new(0.7);
 /// regardless of this flag if `_memories` does not exist.
 pub static MEMORY_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
+// ---------- v0.4 — Tooling expansion ----------
+
+/// Master switch for the `http_fetch` tool. Default `false` because
+/// calling arbitrary URLs from inside a database backend is a significant
+/// expansion of the attack surface. Operators opt-in explicitly.
+pub static ALLOW_HTTP: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// Comma-separated list of allowed URL prefixes for `http_fetch`.
+/// Empty string means "deny everything" (belt-and-suspenders). A
+/// request is allowed only if its URL starts with one of these prefixes.
+pub static HTTP_ALLOW_LIST: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+
+/// Comma-separated list of `schema.table.column` patterns that the
+/// `sql_query` tool redacts before returning results to the model.
+/// The cell text is replaced with `<redacted>`; the column name is
+/// still visible in the header so the model knows the column exists.
+pub static SENSITIVE_COLUMNS: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(None);
+
 // ---------- Snapshot ----------
 
 /// Immutable view of all settings relevant to a single agent run.
@@ -103,6 +123,11 @@ pub struct RuntimeConfig {
     pub embedding_dimensions: usize,
     pub memory_search_alpha: f64,
     pub memory_enabled: bool,
+
+    // v0.4
+    pub allow_http: bool,
+    pub http_allow_list: Vec<String>,
+    pub sensitive_columns: Vec<String>,
 }
 
 impl RuntimeConfig {
@@ -141,6 +166,9 @@ impl RuntimeConfig {
                 .unwrap_or(1536),
             memory_search_alpha: MEMORY_SEARCH_ALPHA.get().clamp(0.0, 1.0),
             memory_enabled: MEMORY_ENABLED.get(),
+            allow_http: ALLOW_HTTP.get(),
+            http_allow_list: comma_list(&HTTP_ALLOW_LIST),
+            sensitive_columns: comma_list(&SENSITIVE_COLUMNS),
         })
     }
 }
@@ -235,8 +263,27 @@ const KNOWN_KEYS: &[&str] = &[
     "embedding_dimensions",
     "memory_search_alpha",
     "memory_enabled",
+    "allow_http",
+    "http_allow_list",
+    "sensitive_columns",
 ];
 
 fn is_known_key(key: &str) -> bool {
     KNOWN_KEYS.contains(&key)
+}
+
+/// Parse a comma-separated GUC string into a cleaned Vec.
+/// Empty or unset → empty vec. Each item trimmed, deduplicated.
+fn comma_list(guc: &GucSetting<Option<CString>>) -> Vec<String> {
+    guc.get()
+        .and_then(|c| c.into_string().ok())
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default()
 }

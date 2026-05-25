@@ -20,6 +20,9 @@ in v0.1, and the hardening checklist for production deployments.
 | Cross-tenant session theft (v0.2)                   | `_sessions.owner = current_user` check on every chat() call |
 | Prompt injection through data ("ignore previous…")  | Tool output framed as quoted block; system prompt is authoritative; readonly limits blast radius |
 | Backend panic crashes Postgres                      | All Rust `Result`s funnel to `pgrx::error!`; no `catch_unwind` over SPI |
+| Model reads sensitive column (password, SSN, token) | `pg_ask.sensitive_columns` redacts matching cells to `<redacted>` (v0.4) |
+| Model calls arbitrary external URLs                 | `pg_ask.allow_http = false` default + URL prefix allow-list (v0.4) |
+| Malicious user-defined tool exfiltrates data        | `pg_ask._tools` owner-scoped; only the creator (or superuser) can delete (v0.4) |
 
 ## Defence in depth
 
@@ -132,6 +135,38 @@ The embedding-provider API key lives in its **own** GUC
 This lets operators mix providers (e.g. OpenAI embeddings + Anthropic
 chat) without leaking either key between subsystems.
 
+### Layer 5c — Column redaction (v0.4)
+
+The `pg_ask.sensitive_columns` GUC accepts a comma-separated list of
+patterns (`schema.table.column` or bare `column`). Before the `sql_query`
+and `sample_table` tools return a result set to the model, every cell is
+checked against the list; matches are replaced with `<redacted>`. The
+column name stays visible in the header so the model knows the column
+exists and can formulate queries that avoid it.
+
+This is a **presentation-layer** filter — the SQL still executes and the
+model still sees the row count, but it cannot learn the actual sensitive
+values. Combine with RLS for defence in depth.
+
+### Layer 5d — User-defined tools (v0.4)
+
+Operators can register custom SQL snippets via
+`pg_ask.register_tool(name, spec, body)`. The body supports `{{key}}`
+placeholder interpolation from the model's jsonb arguments at invocation
+time. Each tool row carries an `owner = current_user` column;
+`pg_ask.unregister_tool(name)` deletes only the caller's own rows,
+with the same NotFound==Unauthorized collapse used for sessions and
+memories.
+
+User-defined tools are loaded into the agent toolset dynamically on every
+turn, so adding a tool does not require a server restart. The spec is a
+JSON Schema object that the model sees alongside built-in tools.
+
+Security note: the body is raw SQL executed as the calling role. There is
+no sql_guard on user-defined tools because the operator explicitly opted
+in to the snippet. Register tools only from audited, version-controlled
+SQL migrations.
+
 ### Layer 6 — Audit log
 
 `pg_ask._traces` records every `ask()` / `sql()` / `preview()` /
@@ -165,6 +200,10 @@ per-session with `SET LOCAL pg_ask.trace_enabled = off;`.
       ceiling (e.g. 5000).
 - [ ] If you don't need network tools (v0.4), keep `pg_ask.allow_http =
       false`.
+- [ ] Set `pg_ask.sensitive_columns` to redact known-sensitive columns
+      (e.g. `users.password, orders.cvv`).
+- [ ] Audit `pg_ask._tools` periodically — user-defined tools execute raw
+      SQL and bypass the sql_guard.
 - [ ] Monitor `pg_ask._traces` (v0.2) — unusual question rate, repeated
       tool errors, or large row counts are early signals of abuse.
 - [ ] Run the extension owner as a non-superuser role with the minimum

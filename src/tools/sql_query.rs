@@ -25,15 +25,16 @@ pub struct SqlQueryTool {
     pub readonly: bool,
     pub max_rows: usize,
     pub statement_timeout_ms: u64,
+    pub sensitive_columns: Vec<String>,
 }
 
 impl Tool for SqlQueryTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "sql_query",
+            name: "sql_query".to_string(),
             description: "Execute a read-only SQL query against the current database \
                 and return the results as a text table. Use this to look up real \
-                values; do not invent data. Prefer adding LIMIT to keep results small.",
+                values; do not invent data. Prefer adding LIMIT to keep results small.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -52,7 +53,7 @@ impl Tool for SqlQueryTool {
             .get("query")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AskError::Tool {
-                name: "sql_query".into(),
+                name: "sql_query".to_string(),
                 message: "missing required argument `query`".into(),
             })?;
 
@@ -72,11 +73,23 @@ impl Tool for SqlQueryTool {
             self.readonly,
             self.max_rows,
             self.statement_timeout_ms,
+            &self.sensitive_columns,
         ) {
             Ok(table) => Ok(ok(table)),
             Err(e) => Ok(err(&format!("query failed: {e}"))),
         }
     }
+}
+
+/// Column-level redaction. Patterns may be exact column names or
+/// dotted suffixes (e.g. `users.password` or just `password`).
+fn is_sensitive_col(col: &str, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    patterns.iter().any(|p| {
+        col == p || col.ends_with(&format!(".{p}"))
+    })
 }
 
 fn ok(text: String) -> ToolOutput {
@@ -103,6 +116,7 @@ fn run_query_to_text(
     readonly: bool,
     max_rows: usize,
     statement_timeout_ms: u64,
+    sensitive: &[String],
 ) -> std::result::Result<String, String> {
     let timeout_sql = format!("SET LOCAL statement_timeout = {statement_timeout_ms}");
     let readonly_sql = "SET LOCAL transaction_read_only = on";
@@ -152,7 +166,12 @@ fn run_query_to_text(
                     .ok()
                     .and_then(|d| d.value::<String>().ok().flatten());
                 let s = val.unwrap_or_else(|| "NULL".to_string());
-                cells.push(truncate_cell(&s));
+                let col_name = col_names.get(c - 1).map(String::as_str).unwrap_or("");
+                cells.push(if is_sensitive_col(col_name, sensitive) {
+                    "<redacted>".to_string()
+                } else {
+                    truncate_cell(&s)
+                });
             }
             rows.push(cells);
         }

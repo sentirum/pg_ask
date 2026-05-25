@@ -52,9 +52,11 @@ people can pick up in an afternoon.
 2. **agent/** depends on traits (`Provider`, `Tool`). It does not know which
    provider or which tool is registered. Adding OpenAI or `http_fetch` must
    not touch `agent/`.
-3. **tools/sql_query** is the *only* module allowed to call `Spi::*` for
-   model-driven queries. All SQL strings passed there go through
-   `sql_guard::validate` first.
+3. **tools/sql_query** and **tools/sample_table** are the *only* modules
+   allowed to call `Spi::*` for model-driven queries. All SQL strings
+   passed to `sql_query` go through `sql_guard::validate` first.
+   `sample_table` builds its own safe `SELECT` shape internally and does
+   not accept raw SQL from the model.
 4. **infra/http** is the *only* module allowed to construct or own a
    `ureq::Agent`. Providers receive a `&HttpClient` handle.
 5. **infra/config** is the *only* module allowed to read a config key.
@@ -72,6 +74,7 @@ src/
     preview.rs               # pg_ask.preview          (v0.2)
     chat.rs                  # pg_ask.chat             (v0.2)
     config.rs                # pg_ask.config / get_config / set_local_config
+    tools.rs                 # pg_ask.register_tool / unregister_tool / list_tools (v0.4)
     version.rs               # pg_ask.version
   agent/
     mod.rs
@@ -85,11 +88,13 @@ src/
     gemini.rs                # Google Gemini generateContent v1beta
     wire.rs                  # canonical Message / ToolCall types
   tools/
-    mod.rs                   # Tool trait + default_toolset
-    sql_query.rs             # SPI executor (uses sql_guard)
+    mod.rs                   # Tool trait + default_toolset + load_user_tools
+    sql_query.rs             # SPI executor (uses sql_guard; sensitive_columns redaction)
     describe_table.rs        # per-table pg_catalog lookup (compact-schema mode)
     recall.rs                # memory hybrid-search tool (compact menu when memory_ready)
-    http_fetch.rs            # v0.4
+    http_fetch.rs            # HTTP GET, allow-list gated (v0.4)
+    sample_table.rs          # SELECT * FROM t LIMIT n, same defence layers as sql_query (v0.4)
+    user_defined.rs          # operator-registered SQL snippets with {{key}} interpolation (v0.4)
   embeddings/
     mod.rs                   # EmbeddingProvider trait + factory
     openai.rs                # /v1/embeddings (also Together, vLLM, llama.cpp, ...)
@@ -211,6 +216,9 @@ Known keys:
 | `pg_ask.embedding_dimensions`    | int     | `1536`               | GUC → table     |
 | `pg_ask.memory_search_alpha`     | float   | `0.7`                | GUC → table     |
 | `pg_ask.memory_enabled`          | bool    | `true`               | GUC → table     |
+| `pg_ask.allow_http`              | bool    | `false`              | GUC → table     |
+| `pg_ask.http_allow_list`         | text    | (empty = deny all)   | GUC → table     |
+| `pg_ask.sensitive_columns`       | text    | (empty = none)       | GUC → table     |
 
 API keys are marked with `GucFlags::SUPERUSER_ONLY | NO_SHOW_ALL` so
 `SHOW ALL` and `pg_settings` don't leak them to ordinary roles.

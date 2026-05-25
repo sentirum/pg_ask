@@ -134,25 +134,39 @@ BEGIN
 END
 $bootstrap_memory$;
 
+-- User-defined tools registry. Operators register SQL snippets that the
+-- agent can invoke like built-in tools. Body is a SQL statement template
+-- with `{{key}}` placeholders replaced from the tool's jsonb arguments at
+-- invocation time. Only the owner (or a superuser) can delete a row.
+CREATE TABLE IF NOT EXISTS pg_ask._tools (
+    name       text        PRIMARY KEY,
+    owner      name        NOT NULL DEFAULT current_user,
+    spec       jsonb       NOT NULL,
+    body       text        NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 -- Lock down internals by default. Users get the public-facing functions via
 -- explicit GRANT in their setup script. _traces stays readable so operators
 -- can audit without extra grants; the writer above is the only INSERT path.
 REVOKE ALL ON ALL TABLES IN SCHEMA pg_ask FROM PUBLIC;
 GRANT  SELECT  ON pg_ask._traces TO PUBLIC;
+GRANT  SELECT  ON pg_ask._tools   TO PUBLIC;
 REVOKE ALL ON FUNCTION pg_ask._write_trace(jsonb) FROM PUBLIC;
 GRANT  EXECUTE ON FUNCTION pg_ask._write_trace(jsonb) TO PUBLIC;
 
--- Memory-table grants must be re-applied AFTER the blanket REVOKE above so
--- ownership-checked memory.* functions can read/write on behalf of the caller.
--- (The `WHERE owner = current_user` clause in every query is what actually
--- prevents cross-tenant access; the GRANT is just "PostgreSQL, please let
--- the row-level predicate decide".)
-DO $memory_grants$
+-- Re-apply grants AFTER the blanket REVOKE so ownership-checked functions
+-- can read/write on behalf of the caller (row-level predicates do the
+-- actual enforcement; GRANT just lets the predicate run).
+DO $reapply_grants$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_class
                 WHERE relnamespace = 'pg_ask'::regnamespace
                   AND relname = '_memories') THEN
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON pg_ask._memories TO PUBLIC';
     END IF;
+    -- _tools needs INSERT/DELETE for register/unregister on behalf of caller.
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON pg_ask._tools TO PUBLIC';
 END
-$memory_grants$;
+$reapply_grants$;

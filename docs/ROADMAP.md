@@ -109,16 +109,24 @@ In-progress milestone. Order of attack:
 
 ## v0.4 — Tooling expansion, RLS-awareness
 
-- [ ] `http_fetch` tool, gated by `pg_ask.allow_http = false` GUC + URL
-      allow-list GUC.
-- [ ] `describe_table` / `sample_table` lightweight tools (cheaper than
-      full schema in prompt).
-- [ ] User-defined tools registered from SQL
-      (`pg_ask.register_tool(name, jsonb_spec, plpgsql_body)`).
-- [ ] **RLS-aware schema dump**: filter out tables / columns the caller
-      cannot `SELECT`. Run introspection as `SECURITY INVOKER`.
-- [ ] **Column allow/deny lists**: `pg_ask.sensitive_columns` GUC; matching
-      column values are returned to the model as `<redacted>`.
+- [x] `http_fetch` tool, gated by `pg_ask.allow_http = false` GUC + URL
+      allow-list GUC. Response body truncated to 8 kB; JSON pretty-printed
+      when parseable.
+- [x] `sample_table` lightweight tool — returns a few rows from any table
+      the caller can `SELECT` from, with the same timeout / readonly /
+      redaction layers as `sql_query`.
+- [x] User-defined tools registered from SQL
+      (`pg_ask.register_tool(name, jsonb_spec, body)`). Body supports
+      `{{key}}` placeholder interpolation from the model's jsonb arguments.
+      Stored in `pg_ask._tools`, owner-scoped (NotFound==Unauthorized collapse
+      on delete). Dynamically loaded into the agent toolset every turn.
+- [x] **RLS-aware schema dump**: `has_table_privilege(c.oid, 'SELECT')`
+      filter added to global introspection queries so invisible tables
+      never leak names into the prompt.
+- [x] **Column allow/deny lists**: `pg_ask.sensitive_columns` GUC
+      (comma-separated `schema.table.column` or bare `column` patterns).
+      Matching cells are replaced with `<redacted>` in both `sql_query`
+      and `sample_table` output.
 
 ## v0.5 — Streaming, observability, hardening
 

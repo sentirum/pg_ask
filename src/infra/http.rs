@@ -26,6 +26,26 @@ impl HttpClient {
         Self { agent }
     }
 
+    /// GET a URL, return the response body as text. Used by the
+    /// `http_fetch` tool (v0.4). Shared timeout policy applies.
+    pub fn get_text(&self, url: &str, headers: &[(&str, &str)]) -> Result<String> {
+        let mut req = self.agent.get(url);
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
+        let resp = req.call();
+        let resp = match resp {
+            Ok(r) => r,
+            Err(ureq::Error::Status(status, r)) => {
+                let body = r.into_string().unwrap_or_default();
+                return Err(AskError::ProviderHttp { status, body });
+            }
+            Err(e) => return Err(AskError::Transport(e.to_string())),
+        };
+        resp.into_string()
+            .map_err(|e| AskError::Transport(e.to_string()))
+    }
+
     /// POST JSON, expect JSON back. Maps ureq error variants onto our
     /// [`AskError`] taxonomy so providers can stay terse.
     pub fn post_json<T: serde::de::DeserializeOwned>(

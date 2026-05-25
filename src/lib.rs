@@ -240,6 +240,32 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Userset,
         GucFlags::default(),
     );
+
+    // ---------- v0.4 — Tooling expansion ----------
+    GucRegistry::define_bool_guc(
+        c"pg_ask.allow_http",
+        c"Enable the http_fetch tool (off by default).",
+        c"When false the tool is not registered and any invocation returns an error.",
+        &ALLOW_HTTP,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"pg_ask.http_allow_list",
+        c"Comma-separated URL prefixes allowed for http_fetch.",
+        c"Empty = deny all. Each request must start with one of these prefixes.",
+        &HTTP_ALLOW_LIST,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_string_guc(
+        c"pg_ask.sensitive_columns",
+        c"Comma-separated schema.table.column patterns to redact in sql_query output.",
+        c"Matched cells are replaced with <redacted>. The column name stays visible.",
+        &SENSITIVE_COLUMNS,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 // ---------- Tests ----------
