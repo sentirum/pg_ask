@@ -4,7 +4,12 @@ on:
   push:
     tags:
       - "v*"           # triggers on v0.5.2, v0.6.0, …
-  workflow_dispatch:   # allow manual re-runs from the Actions UI
+  workflow_dispatch:   # manual re-run from the Actions UI
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.5.2)"
+        required: true
+        default: "v0.5.2"
 
 env:
   REGISTRY: ghcr.io
@@ -26,7 +31,11 @@ jobs:
       - name: Extract version from tag
         id: version
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
           VER="${TAG#v}"
           echo "tag=$TAG"       >> "$GITHUB_OUTPUT"
           echo "version=$VER"   >> "$GITHUB_OUTPUT"

@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"           # triggers on v0.5.2, v0.6.0, …
+  workflow_dispatch:   # manual trigger from the Actions UI
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.5.2)"
+        required: true
+        default: "v0.5.2"
 
 permissions:
   contents: write      # needed to create GitHub releases
@@ -22,9 +28,15 @@ jobs:
       - name: Set version env
         id: version
         run: |
-          TAG="${GITHUB_REF_NAME}"          # e.g. v0.5.2
-          VER="${TAG#v}"                    # e.g. 0.5.2
-          echo "tag=$TAG"   >> "$GITHUB_OUTPUT"
+          # On tag push GITHUB_REF_NAME is the tag (v0.5.2).
+          # On workflow_dispatch the user provides the tag explicitly.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VER="${TAG#v}"
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
       # ── Extract release notes from CHANGELOG.md ──────
