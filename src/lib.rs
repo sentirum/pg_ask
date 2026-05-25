@@ -30,6 +30,7 @@ use pgrx::prelude::*;
 mod agent;
 mod api;
 mod infra;
+mod planner;
 mod providers;
 mod schema;
 mod session;

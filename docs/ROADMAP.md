@@ -36,19 +36,25 @@ The first cut that a careful operator could put in front of a real DB.
 
 ## v0.2 — Multi-provider, sessions, preview, audit
 
-- [ ] OpenAI provider (works with OpenAI-compatible endpoints: Groq,
-      Together, Ollama, vLLM via `base_url`)
-- [ ] Gemini provider
-- [ ] Multi-turn sessions backed by `pg_ask._sessions` / `_messages`
-- [ ] `pg_ask.chat(session_id, message)` — owner check, per-call config overrides as `jsonb`
-- [ ] `pg_ask._sessions.owner name NOT NULL DEFAULT current_user` + check on every chat()
+In-progress milestone. Order of attack:
+`preview()` → `_traces` → OpenAI provider → `chat()` + ownership.
+
 - [ ] **`pg_ask.preview(question) → table(generated_sql text, est_rows bigint, tables text[], warnings text[])`**
-      Produces SQL + `EXPLAIN` summary without executing the query. Postgres-native differentiator.
+      Produces SQL + `EXPLAIN (FORMAT JSON)` summary without executing the
+      query. Strips any leading `EXPLAIN`/`ANALYZE` the model emits so we
+      never accidentally execute; runs the EXPLAIN inside a readonly
+      sub-transaction. Postgres-native differentiator.
 - [ ] `pg_ask._traces` audit table — single insert per `ask()` / `chat()` /
       `preview()`. Writer is `SECURITY DEFINER`. Columns: id, ts, caller, db,
       question, iterations, tool_calls jsonb, final_text, provider, model,
       prompt_tokens, completion_tokens, latency_ms, error.
-- [ ] `pg_ask.trace_enabled` GUC to opt out per session.
+- [ ] `pg_ask.trace_enabled` GUC honoured by writer (already registered).
+- [ ] OpenAI provider (works with OpenAI-compatible endpoints: Groq,
+      Together, Ollama, vLLM via `base_url`).
+- [ ] Gemini provider.
+- [ ] Multi-turn sessions backed by `pg_ask._sessions` / `_messages`.
+- [ ] `pg_ask.chat(session_id, message)` — owner check, per-call config overrides as `jsonb`.
+- [ ] `pg_ask._sessions.owner name NOT NULL DEFAULT current_user` + check on every chat().
 
 ## v0.3 — Memory, retrieval, token budget
 

@@ -9,5 +9,6 @@ mod dispatch;
 mod prompt;
 mod run;
 
-#[allow(unused_imports)]
-pub use run::{run, AgentMode, AgentOutcome};
+pub use run::{run, AgentMode};
+#[allow(unused_imports)] // consumed by telemetry writer once it lands
+pub use run::AgentOutcome;
