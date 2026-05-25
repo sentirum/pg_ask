@@ -74,9 +74,18 @@ jobs:
             https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
+          # Only the dev headers + pg_config; we don't run the
+          # server here. v0.5.3 dropped libssl-dev (ureq 3 = rustls).
           sudo apt-get install -y \
-            postgresql-18 postgresql-server-dev-18 \
-            libssl-dev libclang-dev clang pkg-config
+            postgresql-server-dev-18 \
+            libclang-dev clang pkg-config
+          # Make the system extension dir writable by the runner
+          # user so `cargo pgrx install` can drop pg_ask.control /
+          # pg_ask--*.sql / pg_ask.so into it without sudo. The
+          # runner is throwaway so opening these dirs is harmless.
+          sudo chown -R "$USER" \
+            /usr/share/postgresql/18/extension \
+            /usr/lib/postgresql/18/lib
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -97,28 +106,36 @@ jobs:
         run: cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
 
       # Install into a staging dir so we can bundle a clean tarball.
+      # cargo pgrx install writes directly to the pg_config-reported
+      # paths (which we made writable for the runner user above);
+      # we then copy the artefacts into a release staging tree and
+      # tar it up.
       - name: Build + stage extension files
         id: build
         run: |
           STAGING="staging/pg_ask-${{ steps.version.outputs.version }}-pg18-linux-x86_64"
           mkdir -p "$STAGING"/{lib,extension}
 
-          # Build and install into staging via DESTDIR-style prefix
-          # cargo pgrx install writes directly to pg_config paths,
-          # so we copy the artefacts after install.
+          # cargo pgrx install in 0.18 takes --pg-config positionally
+          # as PATH to pg_config; the system PG18 install puts
+          # pg_config at /usr/lib/postgresql/18/bin.
           cargo pgrx install \
             --release \
-            --features pg18 \
+            --no-default-features --features pg18 \
             --pg-config /usr/lib/postgresql/18/bin/pg_config
 
-          PKGLIBDIR=$(pg_config --pkglibdir)
-          SHAREDIR=$(pg_config --sharedir)
+          PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
+          PKGLIBDIR=$($PG_CONFIG --pkglibdir)
+          SHAREDIR=$($PG_CONFIG --sharedir)
 
           cp "$PKGLIBDIR/pg_ask.so"                      "$STAGING/lib/"
           cp "$SHAREDIR/extension/pg_ask.control"        "$STAGING/extension/"
           cp "$SHAREDIR/extension/pg_ask"*.sql           "$STAGING/extension/"
-          # also bundle the handwritten upgrade script
+          # Also bundle the handwritten upgrade scripts so an
+          # operator who already has an older version can step
+          # through.
           cp sql/pg_ask--0.5.1--0.5.2.sql                "$STAGING/extension/" 2>/dev/null || true
+          cp sql/pg_ask--0.5.2--0.5.3.sql                "$STAGING/extension/" 2>/dev/null || true
 
           # README + CHANGELOG for the bundle
           cp README.md CHANGELOG.md LICENSE "$STAGING/"
