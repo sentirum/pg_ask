@@ -56,10 +56,17 @@ In-progress milestone. Order of attack:
       (Groq, Together, Mistral, Ollama, vLLM, LM Studio) via `base_url`
       override. Provider aliases recognised: `openai`, `openai-compat`,
       `groq`, `together`, `mistral`, `ollama`, `vllm`, `lmstudio`.
+- [x] Multi-turn sessions backed by `pg_ask._sessions` / `_messages`.
+- [x] `pg_ask.create_session(label)`, `pg_ask.chat(session_id, message)`,
+      `pg_ask.clear_session(session_id)` — ownership-checked on every call.
+      Sessions store assistant turns and tool results so the next turn
+      replays the full conversation.
+- [x] `pg_ask._sessions.owner name NOT NULL DEFAULT current_user`. Existence
+      and unauthorized access collapse to the same error so id-space
+      probing leaks no information.
+- [ ] Per-call config overrides as `jsonb` (deferred; current GUC layer
+      already covers session-scoped overrides via `SET LOCAL`).
 - [ ] Gemini provider.
-- [ ] Multi-turn sessions backed by `pg_ask._sessions` / `_messages`.
-- [ ] `pg_ask.chat(session_id, message)` — owner check, per-call config overrides as `jsonb`.
-- [ ] `pg_ask._sessions.owner name NOT NULL DEFAULT current_user` + check on every chat().
 
 ## v0.3 — Memory, retrieval, token budget
 

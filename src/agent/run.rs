@@ -27,15 +27,31 @@ pub enum AgentMode {
 
 /// What the loop produced. The text is what the SQL caller sees; the
 /// `iterations` and `tool_calls` flow into [`crate::telemetry`] so
-/// `pg_ask._traces` reflects what really happened.
+/// `pg_ask._traces` reflects what really happened. `new_turns` is the
+/// suffix of history added during this call (initial user message +
+/// assistant turns + tool results) so the session layer can persist
+/// exactly that slice without recomputing.
 #[derive(Debug)]
 pub struct AgentOutcome {
     pub text: String,
     pub iterations: u32,
     pub tool_calls: Vec<ToolCallTrace>,
+    pub new_turns: Vec<crate::providers::Message>,
 }
 
+/// Single-shot entry: no prior conversation, no persistence.
 pub fn run(question: &str, mode: AgentMode) -> Result<AgentOutcome> {
+    run_with_history(question, Vec::new(), mode)
+}
+
+/// Resume a conversation: `history` is the persisted turn list, `question`
+/// is the new user message appended to it. The caller is responsible for
+/// persisting the resulting turns (api::chat does this).
+pub fn run_with_history(
+    question: &str,
+    prior_history: Vec<Message>,
+    mode: AgentMode,
+) -> Result<AgentOutcome> {
     let cfg = RuntimeConfig::load()?;
     let http = HttpClient::new(cfg.http_connect_timeout_ms, cfg.http_total_timeout_ms);
     let provider = providers::build(&cfg, http)?;
@@ -49,10 +65,12 @@ pub fn run(question: &str, mode: AgentMode) -> Result<AgentOutcome> {
     };
     let specs: Vec<ToolSpec> = tools_vec.iter().map(|t| t.spec()).collect();
 
-    let mut history: Vec<Message> = vec![Message {
+    let prior_len = prior_history.len();
+    let mut history: Vec<Message> = prior_history;
+    history.push(Message {
         role: Role::User,
         content: MessageContent::Text(question.to_string()),
-    }];
+    });
     let mut tool_trace: Vec<ToolCallTrace> = Vec::new();
 
     for iteration in 0..cfg.max_iterations {
@@ -62,10 +80,18 @@ pub fn run(question: &str, mode: AgentMode) -> Result<AgentOutcome> {
         let resp = provider.complete(&system_prompt, &history, &specs)?;
         match resp {
             ProviderResponse::Final { text } => {
+                // Append the final assistant message so it gets persisted
+                // along with the rest of this turn's history slice.
+                history.push(Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Text(text.clone()),
+                });
+                let new_turns = history.split_off(prior_len);
                 return Ok(AgentOutcome {
                     text,
                     iterations: iteration + 1,
                     tool_calls: tool_trace,
+                    new_turns,
                 });
             }
 

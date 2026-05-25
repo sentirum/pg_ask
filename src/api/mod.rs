@@ -10,6 +10,7 @@
 //! find yourself reaching for `serde_json` here, you are in the wrong file.
 
 pub mod ask;
+pub mod chat;
 pub mod config;
 pub mod preview;
 pub mod trace;

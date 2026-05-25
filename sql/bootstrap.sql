@@ -11,12 +11,18 @@ CREATE TABLE IF NOT EXISTS pg_ask._config (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
--- Session log (reserved for v0.2 multi-turn).
+-- Session log. One row per multi-turn conversation. `owner` is captured
+-- at create-time and every chat() / clear_session() call checks it against
+-- current_user so sessions cannot leak across roles.
 CREATE TABLE IF NOT EXISTS pg_ask._sessions (
-    id         uuid PRIMARY KEY,
+    id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner      name        NOT NULL DEFAULT current_user,
+    label      text,
     created_at timestamptz NOT NULL DEFAULT now(),
-    label      text
+    updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS _sessions_owner_idx
+    ON pg_ask._sessions (owner, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS pg_ask._messages (
     session_id uuid NOT NULL REFERENCES pg_ask._sessions(id) ON DELETE CASCADE,
@@ -24,6 +30,8 @@ CREATE TABLE IF NOT EXISTS pg_ask._messages (
     role       text NOT NULL CHECK (role IN ('system','user','assistant','tool')),
     content    text NOT NULL,
     tool_calls jsonb,
+    tool_call_id text,
+    is_error   bool,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (session_id, idx)
 );

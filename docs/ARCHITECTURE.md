@@ -98,7 +98,8 @@ src/
     introspect.rs            # pg_catalog queries
     render.rs                # compact text rendering
   session/
-    mod.rs                   # v0.2 stub today
+    mod.rs                   # create / load_history / append / clear
+    store.rs                 # SPI primitives (parameterised; owner check)
   telemetry/
     mod.rs                   # TraceRecord + writer; no-op if _traces missing
   infra/
