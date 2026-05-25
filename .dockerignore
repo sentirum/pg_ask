@@ -1,0 +1,31 @@
+# Rust build artefacts (large, not needed in the image context)
+target/
+target-*
+
+# pgrx test databases
+.pgrx/
+
+# Git history
+.git/
+.gitignore
+
+# CI / docs (don't need to be in the build context)
+.github/
+docs/
+
+# OS junk
+.DS_Store
+**/*.swp
+**/*~
+
+# Test fixtures (large JSON, not needed at runtime)
+# (kept small; only exclude what notably inflates the context)
+tests/fixtures/*.json
+
+# Editor
+.vscode/
+.idea/
+
+# Local env files that might contain secrets
+.env
+.env.*

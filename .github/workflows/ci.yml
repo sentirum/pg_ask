@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "=0.18.0"    # keep in sync with Cargo.toml
+
+jobs:
+  # ─────────────────────────────────────────────────────
+  # Job 1: fast lint + unit-test pass (no PG needed)
+  # ─────────────────────────────────────────────────────
+  lint-and-test:
+    name: Lint + Unit tests (pg18, Linux x86_64)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Rust toolchain ──────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # ── Cargo cache ─────────────────────────────────
+      - name: Cache Cargo registry + build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # ── System deps ─────────────────────────────────
+      #    cargo pgrx needs clang for bindgen and PG18
+      #    server headers for the generated FFI types.
+      #    PG18 is not in Ubuntu 24.04 universe; we pull
+      #    it from the official PGDG apt repo.
+      - name: Add PGDG apt repository (PostgreSQL 18)
+        run: |
+          sudo apt-get install -y curl gnupg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] \
+            https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+
+      - name: Install PG18 + build deps
+        run: |
+          sudo apt-get install -y \
+            postgresql-18 postgresql-server-dev-18 \
+            libssl-dev libclang-dev clang pkg-config
+
+      # ── cargo-pgrx ──────────────────────────────────
+      - name: Cache cargo-pgrx binary
+        id: cache-pgrx-bin
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-pgrx
+          key: ${{ runner.os }}-cargo-pgrx-${{ env.PGRX_VERSION }}
+
+      - name: Install cargo-pgrx
+        if: steps.cache-pgrx-bin.outputs.cache-hit != 'true'
+        run: cargo install cargo-pgrx --locked --version ${{ env.PGRX_VERSION }}
+
+      # Point pgrx at the system PG18 (skips the multi-GB download).
+      - name: Initialise pgrx against system PG18
+        run: cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
+
+      # ── Checks ──────────────────────────────────────
+      - name: rustfmt check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny warnings)
+        run: |
+          cargo clippy \
+            --no-default-features --features pg18 \
+            -- -D warnings
+
+      - name: Unit tests (no PG connection needed)
+        run: |
+          cargo test \
+            --no-default-features --features pg18 \
+            --lib -- --nocapture
+
+  # ─────────────────────────────────────────────────────
+  # Job 2: sql_guard + planner + tools unit tests
+  #         (identical set, separate job for clear GH UI)
+  # ─────────────────────────────────────────────────────
+  test-modules:
+    name: Module unit tests (sql_guard / tools / telemetry)
+    runs-on: ubuntu-24.04
+    # re-uses the same steps — kept separate so failures
+    # surface per-module in the PR checks UI.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Add PGDG + install PG18 dev
+        run: |
+          sudo apt-get install -y curl gnupg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] \
+            https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y \
+            postgresql-18 postgresql-server-dev-18 \
+            libssl-dev libclang-dev clang pkg-config
+
+      - name: Cache cargo-pgrx binary
+        id: cache-pgrx-bin
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-pgrx
+          key: ${{ runner.os }}-cargo-pgrx-${{ env.PGRX_VERSION }}
+
+      - name: Install cargo-pgrx
+        if: steps.cache-pgrx-bin.outputs.cache-hit != 'true'
+        run: cargo install cargo-pgrx --locked --version ${{ env.PGRX_VERSION }}
+
+      - name: Initialise pgrx against system PG18
+        run: |
+          cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
+
+      - name: Run sql_guard tests
+        run: |
+          cargo test \
+            --no-default-features --features pg18 \
+            --lib sql_guard -- --nocapture
+
+      - name: Run telemetry tests (truncation + UTF-8 regression)
+        run: |
+          cargo test \
+            --no-default-features --features pg18 \
+            --lib telemetry -- --nocapture

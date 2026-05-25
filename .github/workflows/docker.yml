@@ -1,0 +1,83 @@
+name: Docker
+
+on:
+  push:
+    tags:
+      - "v*"           # triggers on v0.5.2, v0.6.0, …
+  workflow_dispatch:   # allow manual re-runs from the Actions UI
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE:    ghcr.io/sentirum/pg_ask
+
+permissions:
+  contents: read
+  packages: write      # needed to push to GHCR
+
+jobs:
+  build-push:
+    name: Build & push multi-arch Docker image
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Meta ────────────────────────────────────────
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          echo "tag=$TAG"       >> "$GITHUB_OUTPUT"
+          echo "version=$VER"   >> "$GITHUB_OUTPUT"
+
+      - name: Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            # versioned tag:  ghcr.io/sentirum/pg_ask:0.5.2-pg18
+            type=raw,value=${{ steps.version.outputs.version }}-pg18
+            # moving latest:  ghcr.io/sentirum/pg_ask:latest-pg18
+            type=raw,value=latest-pg18
+          labels: |
+            org.opencontainers.image.title=pg_ask
+            org.opencontainers.image.description=Ask your PostgreSQL database in natural language
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.licenses=PostgreSQL
+
+      # ── Build infra ──────────────────────────────────
+      #    QEMU allows building linux/arm64 images on
+      #    x86_64 runners via emulation. For arm64 the
+      #    compilation will be slow but correct.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── GHCR login ───────────────────────────────────
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Build + push ─────────────────────────────────
+      #    Build cache from/to the registry so repeated
+      #    tag pushes don't recompile cargo from scratch.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags:   ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to:   type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+          build-args: |
+            PG_MAJOR=18
+            PGRX_VERSION=0.18.0

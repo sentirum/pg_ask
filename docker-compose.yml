@@ -1,0 +1,51 @@
+# pg_ask quick-start with docker compose.
+#
+# Usage:
+#   docker compose up -d
+#   docker compose exec pg_ask psql -U postgres -d pg_ask_demo
+#
+# Then in psql:
+#   SELECT ask.config('provider', 'anthropic');
+#   SELECT ask.config('api_key',  'sk-ant-...');
+#   SELECT ask.ask('how many tables do we have?');
+#
+# Set your API key via an environment variable instead of hardcoding:
+#   PG_ASK_API_KEY=sk-ant-... docker compose up -d
+#
+# For the ZAI Anthropic-compatible endpoint (GLM-5.1):
+#   PG_ASK_PROVIDER=anthropic \
+#   PG_ASK_BASE_URL=https://api.z.ai/api/anthropic \
+#   PG_ASK_MODEL=glm-5.1 \
+#   PG_ASK_API_KEY=<zai-key> \
+#   docker compose up -d
+
+services:
+  pg_ask:
+    image: ghcr.io/sentirum/pg_ask:latest-pg18
+    # To build locally instead of pulling:
+    # build: .
+    container_name: pg_ask
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
+      POSTGRES_DB:       ${POSTGRES_DB:-pg_ask_demo}
+      # Optional: pre-configure the AI provider via env so ask.config()
+      # calls aren't needed after first start. These are written into
+      # ask._config by the 01-configure.sh initdb hook (if API key is set).
+      PG_ASK_PROVIDER:   ${PG_ASK_PROVIDER:-}
+      PG_ASK_BASE_URL:   ${PG_ASK_BASE_URL:-}
+      PG_ASK_MODEL:      ${PG_ASK_MODEL:-}
+      PG_ASK_API_KEY:    ${PG_ASK_API_KEY:-}
+    volumes:
+      - pg_ask_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pg_ask_data:

@@ -1,0 +1,159 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"           # triggers on v0.5.2, v0.6.0, …
+
+permissions:
+  contents: write      # needed to create GitHub releases
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed for git describe / tag listing
+
+      # ── Extract version from tag ─────────────────────
+      - name: Set version env
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"          # e.g. v0.5.2
+          VER="${TAG#v}"                    # e.g. 0.5.2
+          echo "tag=$TAG"   >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      # ── Extract release notes from CHANGELOG.md ──────
+      #    Grabs everything between the ## [X.Y.Z] heading
+      #    for this release and the next ## [ heading.
+      - name: Extract release notes
+        id: notes
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          # awk: print lines between the version heading
+          # (inclusive) and the next ## [ heading (exclusive).
+          NOTES=$(awk \
+            "/^## \[${VER//./\\.}\]/{found=1; next} \
+             found && /^## \[/{exit} \
+             found{print}" \
+            CHANGELOG.md)
+          # GitHub's multiline output encoding
+          {
+            echo 'notes<<CHANGELOG_BODY'
+            echo "$NOTES"
+            echo 'CHANGELOG_BODY'
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Build release artefact (Linux, statically linked deps) ──
+      #    We ship the source-only tarball via GitHub's automatic
+      #    zip/tar.gz on the release; a separate pre-built .so for
+      #    Linux x86_64 is produced here so users can drop it in
+      #    without a full Rust toolchain.
+      - name: Add PGDG + install PG18 dev headers
+        run: |
+          sudo apt-get install -y curl gnupg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] \
+            https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y \
+            postgresql-18 postgresql-server-dev-18 \
+            libssl-dev libclang-dev clang pkg-config
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --locked --version =0.18.0
+
+      - name: Initialise pgrx (system PG18)
+        run: cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
+
+      # Install into a staging dir so we can bundle a clean tarball.
+      - name: Build + stage extension files
+        id: build
+        run: |
+          STAGING="staging/pg_ask-${{ steps.version.outputs.version }}-pg18-linux-x86_64"
+          mkdir -p "$STAGING"/{lib,extension}
+
+          # Build and install into staging via DESTDIR-style prefix
+          # cargo pgrx install writes directly to pg_config paths,
+          # so we copy the artefacts after install.
+          cargo pgrx install \
+            --release \
+            --features pg18 \
+            --pg-config /usr/lib/postgresql/18/bin/pg_config
+
+          PKGLIBDIR=$(pg_config --pkglibdir)
+          SHAREDIR=$(pg_config --sharedir)
+
+          cp "$PKGLIBDIR/pg_ask.so"                      "$STAGING/lib/"
+          cp "$SHAREDIR/extension/pg_ask.control"        "$STAGING/extension/"
+          cp "$SHAREDIR/extension/pg_ask"*.sql           "$STAGING/extension/"
+          # also bundle the handwritten upgrade script
+          cp sql/pg_ask--0.5.1--0.5.2.sql                "$STAGING/extension/" 2>/dev/null || true
+
+          # README + CHANGELOG for the bundle
+          cp README.md CHANGELOG.md LICENSE "$STAGING/"
+
+          # Package
+          ARCHIVE="$STAGING.tar.gz"
+          tar -czf "$ARCHIVE" -C staging "$(basename "$STAGING")"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      # ── Create GitHub Release ────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "pg_ask ${{ steps.version.outputs.tag }}"
+          body: |
+            ## pg_ask ${{ steps.version.outputs.tag }}
+
+            ${{ steps.notes.outputs.notes }}
+
+            ---
+
+            ### Install (pre-built, Linux x86_64 + PG18)
+
+            Download the tarball below and run:
+
+            ```bash
+            tar xzf pg_ask-${{ steps.version.outputs.version }}-pg18-linux-x86_64.tar.gz
+            cd pg_ask-${{ steps.version.outputs.version }}-pg18-linux-x86_64
+            # as the postgres user:
+            cp lib/pg_ask.so      $(pg_config --pkglibdir)/
+            cp extension/*        $(pg_config --sharedir)/extension/
+            ```
+
+            Then in psql:
+
+            ```sql
+            CREATE EXTENSION pg_ask;
+            ```
+
+            ### Docker
+
+            ```bash
+            docker pull ghcr.io/sentirum/pg_ask:${{ steps.version.outputs.version }}-pg18
+            ```
+
+            See [README.md](https://github.com/sentirum/pg_ask#readme) for full setup.
+          files: ${{ steps.build.outputs.archive }}
+          draft: false
+          prerelease: false
