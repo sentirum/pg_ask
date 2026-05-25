@@ -222,7 +222,10 @@ fn apply_sensitive(
     if sensitive.is_empty() {
         return cells;
     }
-    let mask: Vec<bool> = columns.iter().map(|c| is_sensitive_col(c, sensitive)).collect();
+    let mask: Vec<bool> = columns
+        .iter()
+        .map(|c| is_sensitive_col(c, sensitive))
+        .collect();
     cells
         .into_iter()
         .map(|row| {
@@ -250,9 +253,12 @@ fn apply_sensitive(
 /// patterns by the bare alias they expect to see; FQN-style patterns
 /// are kept for forward compatibility / `sample_table` reuse.
 fn is_sensitive_col(col: &str, patterns: &[String]) -> bool {
-    patterns
-        .iter()
-        .any(|p| col.eq_ignore_ascii_case(p) || col.to_ascii_lowercase().ends_with(&format!(".{}", p.to_ascii_lowercase())))
+    patterns.iter().any(|p| {
+        col.eq_ignore_ascii_case(p)
+            || col
+                .to_ascii_lowercase()
+                .ends_with(&format!(".{}", p.to_ascii_lowercase()))
+    })
 }
 
 fn truncate_cell(s: &str) -> String {
@@ -358,7 +364,11 @@ mod tests {
     #[test]
     fn sensitive_redaction_matches_by_name_and_suffix() {
         let cells = vec![vec!["plain".into(), "secret".into(), "shhh".into()]];
-        let cols = vec!["name".to_string(), "password".to_string(), "users.api_key".to_string()];
+        let cols = vec![
+            "name".to_string(),
+            "password".to_string(),
+            "users.api_key".to_string(),
+        ];
         let masked = apply_sensitive(
             &cols,
             cells,
@@ -370,11 +380,7 @@ mod tests {
     #[test]
     fn sensitive_match_is_case_insensitive() {
         let cells = vec![vec!["secret".into()]];
-        let masked = apply_sensitive(
-            &["Password".to_string()],
-            cells,
-            &["password".to_string()],
-        );
+        let masked = apply_sensitive(&["Password".to_string()], cells, &["password".to_string()]);
         assert_eq!(masked[0], vec!["<redacted>"]);
     }
 

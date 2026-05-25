@@ -121,22 +121,34 @@ mod strip_tests {
     #[test]
     fn passthrough_when_no_explain() {
         assert_eq!(strip_leading_explain("SELECT 1"), "SELECT 1");
-        assert_eq!(strip_leading_explain("with x as (select 1) select * from x"),
-                   "with x as (select 1) select * from x");
+        assert_eq!(
+            strip_leading_explain("with x as (select 1) select * from x"),
+            "with x as (select 1) select * from x"
+        );
     }
 
     #[test]
     fn strips_bareword_options() {
         assert_eq!(strip_leading_explain("EXPLAIN SELECT 1"), "SELECT 1");
-        assert_eq!(strip_leading_explain("EXPLAIN ANALYZE SELECT 1"), "SELECT 1");
-        assert_eq!(strip_leading_explain("explain analyze verbose buffers select * from t"),
-                   "select * from t");
+        assert_eq!(
+            strip_leading_explain("EXPLAIN ANALYZE SELECT 1"),
+            "SELECT 1"
+        );
+        assert_eq!(
+            strip_leading_explain("explain analyze verbose buffers select * from t"),
+            "select * from t"
+        );
     }
 
     #[test]
     fn strips_parenthesised_options() {
-        assert_eq!(strip_leading_explain("EXPLAIN (ANALYZE, BUFFERS) SELECT 1"), "SELECT 1");
-        assert_eq!(strip_leading_explain("EXPLAIN (FORMAT JSON) SELECT * FROM t"),
-                   "SELECT * FROM t");
+        assert_eq!(
+            strip_leading_explain("EXPLAIN (ANALYZE, BUFFERS) SELECT 1"),
+            "SELECT 1"
+        );
+        assert_eq!(
+            strip_leading_explain("EXPLAIN (FORMAT JSON) SELECT * FROM t"),
+            "SELECT * FROM t"
+        );
     }
 }

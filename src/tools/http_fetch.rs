@@ -97,7 +97,8 @@ impl Tool for HttpFetchTool {
                 Use this for public API endpoints, documentation, or reference data. \
                 Only URLs matching the operator allow-list are permitted. Redirects \
                 are not followed automatically — if a 3xx is returned, re-issue \
-                the fetch against the Location header (which is also checked).".to_string(),
+                the fetch against the Location header (which is also checked)."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -484,12 +485,11 @@ mod tests {
     #[test]
     fn allow_private_hosts_overrides_ip_guard() {
         // Self-hosted scenario: operator opted in.
-        let r = validate_url(
-            "http://10.0.0.5:8080/x",
-            &["10.0.0.5".to_string()],
-            true,
+        let r = validate_url("http://10.0.0.5:8080/x", &["10.0.0.5".to_string()], true);
+        assert!(
+            r.is_ok(),
+            "private host should be allowed when opted in; got {r:?}"
         );
-        assert!(r.is_ok(), "private host should be allowed when opted in; got {r:?}");
     }
 
     #[test]

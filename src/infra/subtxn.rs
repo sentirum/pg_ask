@@ -109,9 +109,8 @@ where
     // structures owned by the current backend's transaction
     // machinery — we use them only to *restore* them, never to
     // dereference fields.
-    let (oldcontext, oldowner) = unsafe {
-        (pg_sys::CurrentMemoryContext, pg_sys::CurrentResourceOwner)
-    };
+    let (oldcontext, oldowner) =
+        unsafe { (pg_sys::CurrentMemoryContext, pg_sys::CurrentResourceOwner) };
 
     begin_subtransaction(name);
     // After `BeginInternalSubTransaction`, Postgres has switched to
@@ -247,8 +246,7 @@ mod tests {
                 .map_err(|e| crate::infra::errors::AskError::Sql(e.to_string()))
         });
         assert!(out.is_ok());
-        let n: Option<i64> =
-            Spi::get_one("SELECT count(*) FROM _subtxn_commit_probe").unwrap();
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM _subtxn_commit_probe").unwrap();
         assert_eq!(n, Some(1));
     }
 
@@ -269,9 +267,12 @@ mod tests {
             Ok(())
         });
         assert!(out.is_err(), "divide-by-zero should surface as Err");
-        let n: Option<i64> =
-            Spi::get_one("SELECT count(*) FROM _subtxn_rollback_probe").unwrap();
-        assert_eq!(n, Some(0), "insert from inside the aborted subtxn must be gone");
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM _subtxn_rollback_probe").unwrap();
+        assert_eq!(
+            n,
+            Some(0),
+            "insert from inside the aborted subtxn must be gone"
+        );
         // And the outer txn is still healthy.
         let one: Option<i32> = Spi::get_one("SELECT 1").unwrap();
         assert_eq!(one, Some(1));

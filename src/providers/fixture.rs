@@ -77,14 +77,14 @@ pub struct FixtureProvider {
 impl FixtureProvider {
     pub fn new(cfg: &RuntimeConfig) -> Result<Self> {
         let model = cfg.model.as_deref().unwrap_or("");
-        let scenario = model.strip_prefix("fixture:").ok_or_else(|| {
-            AskError::InvalidConfig {
+        let scenario = model
+            .strip_prefix("fixture:")
+            .ok_or_else(|| AskError::InvalidConfig {
                 key: "model",
                 message: format!(
                     "fixture provider expects `model = 'fixture:<scenario>'`, got `{model}`"
                 ),
-            }
-        })?;
+            })?;
 
         // `base_url` is reused as a filesystem path here. Default points
         // at the repo's own fixtures directory so `cargo test` works
@@ -93,9 +93,7 @@ impl FixtureProvider {
             .base_url
             .as_deref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-            });
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"));
 
         Ok(Self {
             scenario: scenario.to_string(),
@@ -106,10 +104,7 @@ impl FixtureProvider {
     fn load(&self) -> Result<Vec<FixtureTurn>> {
         let path = self.base_dir.join(format!("{}.json", self.scenario));
         let bytes = std::fs::read(&path).map_err(|e| {
-            AskError::Transport(format!(
-                "fixture: cannot read {}: {e}",
-                path.display()
-            ))
+            AskError::Transport(format!("fixture: cannot read {}: {e}", path.display()))
         })?;
         serde_json::from_slice::<Vec<FixtureTurn>>(&bytes).map_err(|e| {
             AskError::Transport(format!(

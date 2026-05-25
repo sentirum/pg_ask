@@ -54,10 +54,8 @@ pub fn build(cfg: &RuntimeConfig, http: HttpClient) -> Result<Box<dyn Provider>>
         // The OpenAI provider also handles every OpenAI-compatible
         // endpoint when `pg_ask.base_url` is set. Aliases let users pick a
         // hosting name even though the wire format is the same.
-        "openai" | "openai-compat" | "groq" | "together" | "mistral"
-        | "ollama" | "vllm" | "lmstudio" => {
-            Ok(Box::new(openai::OpenAiProvider::new(cfg, http)))
-        }
+        "openai" | "openai-compat" | "groq" | "together" | "mistral" | "ollama" | "vllm"
+        | "lmstudio" => Ok(Box::new(openai::OpenAiProvider::new(cfg, http))),
 
         _ => Err(AskError::UnsupportedProvider(cfg.provider.clone())),
     }

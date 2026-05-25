@@ -35,7 +35,8 @@ impl Tool for SampleTableTool {
             name: "sample_table".to_string(),
             description: "Return a few sample rows from a table. Use this when \
                 you need to see actual data values or column contents without \
-                writing a full query.".to_string(),
+                writing a full query."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -180,11 +181,7 @@ fn run_sample(
 /// dotted form whose tail matches `schema.table.*`, we also push the
 /// bare column suffix so a bare column from the JSON wrapper still
 /// matches.
-fn expand_patterns_for_table(
-    schema: &str,
-    table: &str,
-    patterns: &[String],
-) -> Vec<String> {
+fn expand_patterns_for_table(schema: &str, table: &str, patterns: &[String]) -> Vec<String> {
     let prefix = format!("{schema}.{table}.").to_ascii_lowercase();
     let table_prefix = format!("{table}.").to_ascii_lowercase();
     let mut out: Vec<String> = Vec::with_capacity(patterns.len() * 2);

@@ -64,9 +64,8 @@ pub fn pgvector_installed() -> Result<bool> {
     if INSTALLED.load(Ordering::Relaxed) {
         return Ok(true);
     }
-    let found: Option<bool> = Spi::get_one(
-        "SELECT TRUE FROM pg_extension WHERE extname = 'vector'",
-    )?;
+    let found: Option<bool> =
+        Spi::get_one("SELECT TRUE FROM pg_extension WHERE extname = 'vector'")?;
     let v = found.unwrap_or(false);
     if v {
         INSTALLED.store(true, Ordering::Relaxed);
@@ -74,12 +73,7 @@ pub fn pgvector_installed() -> Result<bool> {
     Ok(v)
 }
 
-pub fn insert(
-    content: &str,
-    namespace: &str,
-    metadata: Value,
-    embedding: &[f32],
-) -> Result<Uuid> {
+pub fn insert(content: &str, namespace: &str, metadata: Value, embedding: &[f32]) -> Result<Uuid> {
     let embedding_lit = encode_vector(embedding);
     let metadata_text = metadata.to_string();
 
@@ -170,11 +164,7 @@ pub fn list_memories(
         let rows = client.select(
             query,
             None,
-            &[
-                namespace.into(),
-                limit_i32.into(),
-                offset_i32.into(),
-            ],
+            &[namespace.into(), limit_i32.into(), offset_i32.into()],
         )?;
         for row in rows {
             let id: Uuid = match row
@@ -206,8 +196,7 @@ pub fn list_memories(
                 .and_then(|d| d.value::<String>().ok().flatten())
                 .unwrap_or_default();
 
-            let metadata: Value =
-                serde_json::from_str(&metadata_text).unwrap_or(Value::Null);
+            let metadata: Value = serde_json::from_str(&metadata_text).unwrap_or(Value::Null);
             out.push(MemoryRow {
                 id,
                 namespace: ns,
@@ -274,29 +263,50 @@ pub fn hybrid_search(
     // is the same ratio Weaviate/Qdrant use by default for hybrid;
     // operators with adversarial recall workloads can ALTER the
     // multiplier later via a GUC (planned but not in this fix).
+    //
+    // ## HP2 (Gemini v0.5.2 review item 2.1): drop the `q` CTE
+    //
+    // The original H9 fix kept a single `q` CTE holding the query
+    // vector + tsquery and referenced it as `(SELECT vec FROM q)`
+    // in stage 1's ORDER BY. That re-introduced the ANN bypass:
+    // pgvector's ivfflat / hnsw plan only triggers when the right
+    // side of the `<=>` operator is a literal or a *direct* bind
+    // parameter — not a subquery. A subquery looks variable to the
+    // planner and forces it back to a sequential scan + sort.
+    //
+    // Fix: drop the `q` CTE entirely; reference `$1::vector` directly
+    // in every place it's needed (cand ORDER BY + the cosine
+    // similarity in the score expression). The tsquery still benefits
+    // from a CTE because it's used twice and is non-trivial to
+    // compute, but it sits outside the ORDER BY that drives the
+    // index choice. Verified with EXPLAIN (COSTS OFF) against a
+    // table with an HNSW index: previous version showed Seq Scan +
+    // Sort; this version shows Index Scan using
+    // _memories_embedding_idx.
     let query = "
-        WITH q AS (
-            SELECT $1::vector AS vec,
-                   plainto_tsquery('simple', $2::text) AS tsq
+        WITH tsq AS (
+            SELECT plainto_tsquery('simple', $2::text) AS q
         ),
         cand AS (
-            -- Stage 1: ANN over-fetch. Order-by uses the cosine
-            -- distance operator alone so the ivfflat index can serve
-            -- it; we pull GREATEST(limit*5, 50) rows so the rerank in
-            -- stage 2 has enough signal even at small limits.
+            -- Stage 1: ANN over-fetch. `$1::vector` is referenced
+            -- directly (NOT through a CTE) so the planner sees a
+            -- bind parameter on the right of `<=>` and can pick
+            -- the ivfflat / hnsw index. We pull
+            -- GREATEST(limit*5, 50) rows so the rerank in stage 2
+            -- has enough signal even at small limits.
             SELECT m.id, m.content, m.metadata, m.embedding, m.tsv
               FROM ask._memories m
              WHERE m.owner = current_user
                AND m.namespace = $4::text
-             ORDER BY m.embedding <=> (SELECT vec FROM q)
+             ORDER BY m.embedding <=> $1::vector
              LIMIT GREATEST($5::int * 5, 50)
         )
         SELECT c.id,
                c.content,
                c.metadata::text,
                (
-                   ($3::float8) * (1 - (c.embedding <=> (SELECT vec FROM q)))
-                 + (1 - $3::float8) * (1.0 / (1.0 + COALESCE(ts_rank_cd(c.tsv, (SELECT tsq FROM q)), 0)))
+                   ($3::float8) * (1 - (c.embedding <=> $1::vector))
+                 + (1 - $3::float8) * (1.0 / (1.0 + COALESCE(ts_rank_cd(c.tsv, (SELECT q FROM tsq)), 0)))
                ) AS score
           FROM cand c
          ORDER BY score DESC
@@ -404,5 +414,4 @@ mod tests {
         let stripped = &v[1..v.len() - 1];
         assert_eq!(stripped.split(',').count(), 3);
     }
-
 }

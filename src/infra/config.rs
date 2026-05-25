@@ -52,8 +52,7 @@ pub static EMBEDDING_PROVIDER: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
 pub static EMBEDDING_API_KEY: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
-pub static EMBEDDING_MODEL: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(None);
+pub static EMBEDDING_MODEL: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 pub static EMBEDDING_BASE_URL: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
 pub static EMBEDDING_DIMENSIONS: GucSetting<i32> = GucSetting::<i32>::new(1536);
@@ -79,8 +78,7 @@ pub static ALLOW_HTTP: GucSetting<bool> = GucSetting::<bool>::new(false);
 /// Comma-separated list of allowed URL prefixes for `http_fetch`.
 /// Empty string means "deny everything" (belt-and-suspenders). A
 /// request is allowed only if its URL starts with one of these prefixes.
-pub static HTTP_ALLOW_LIST: GucSetting<Option<CString>> =
-    GucSetting::<Option<CString>>::new(None);
+pub static HTTP_ALLOW_LIST: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
 
 /// When `on`, `http_fetch` will permit literal-IP hosts in private /
 /// loopback / link-local / CGNAT ranges. Off by default to make SSRF
@@ -216,14 +214,30 @@ pub fn upsert_table(key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Read a config value from the table fallback only. Used by the SQL-callable
-/// `ask.get_config(key)`; for the agent's own resolution use
-/// [`RuntimeConfig::load`].
+/// Read a config value from the table fallback only.
+///
+/// ## C3-bis follow-up (Gemini v0.5.2 review item 1.4)
+///
+/// v0.5.2 added `REVOKE ALL ON ask._config FROM PUBLIC` to lock the
+/// secrets table down to operators. The public `ask.get_config(key)`
+/// SQL function regained access via `security_definer` on the
+/// `#[pg_extern]`, but the *internal* call sites —
+/// `RuntimeConfig::load` → `required_string` / `optional_string` →
+/// `read_table` — still hit the SQL under the caller's invoker
+/// privileges. For a non-superuser calling `ask.chat()` or
+/// `ask.ask()`, that meant every config lookup failed with
+/// `permission denied for table _config` even though the public
+/// surface was fixed.
+///
+/// The fix routes the SELECT through a SECURITY DEFINER helper
+/// (`ask._config_get`) which the v0.5.3 migration script and
+/// `sql/bootstrap.sql` both ship. The helper does no filtering of
+/// its own — redaction still lives in `api::config::get_config`
+/// (`is_secret(key)` → `***redacted***`) so this internal path can
+/// still see the raw value, which is what `RuntimeConfig` actually
+/// needs.
 pub fn read_table(key: &str) -> Result<Option<String>> {
-    spi::select_one_text_with(
-        "SELECT value FROM ask._config WHERE key = $1",
-        &[key.into()],
-    )
+    spi::select_one_text_with("SELECT ask._config_get($1)", &[key.into()])
 }
 
 // ---------- Internals ----------

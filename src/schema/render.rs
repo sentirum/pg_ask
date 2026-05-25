@@ -31,10 +31,7 @@
 use super::introspect::{ColumnRow, TableKey};
 use std::collections::HashMap;
 
-pub fn render_full(
-    rows: &[ColumnRow],
-    table_comments: &[(TableKey, String)],
-) -> String {
+pub fn render_full(rows: &[ColumnRow], table_comments: &[(TableKey, String)]) -> String {
     if rows.is_empty() {
         return "(no user-visible tables found)".into();
     }
@@ -83,10 +80,7 @@ pub fn render_full(
     out
 }
 
-pub fn render_compact(
-    rows: &[ColumnRow],
-    table_comments: &[(TableKey, String)],
-) -> String {
+pub fn render_compact(rows: &[ColumnRow], table_comments: &[(TableKey, String)]) -> String {
     if rows.is_empty() {
         return "(no user-visible tables found)".into();
     }

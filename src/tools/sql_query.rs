@@ -62,7 +62,8 @@ impl Tool for SqlQueryTool {
             name: "sql_query".to_string(),
             description: "Execute a read-only SQL query against the current database \
                 and return the results as a text table. Use this to look up real \
-                values; do not invent data. Prefer adding LIMIT to keep results small.".to_string(),
+                values; do not invent data. Prefer adding LIMIT to keep results small."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -179,14 +180,12 @@ fn run_query_to_text(
     let query_owned = query.to_string();
     let max_rows_copy = max_rows;
     let timeout_ms = statement_timeout_ms;
-    let subtxn_result = crate::infra::subtxn::run_in_subtransaction(
-        Some("pg_ask_sql_query"),
-        move || {
+    let subtxn_result =
+        crate::infra::subtxn::run_in_subtransaction(Some("pg_ask_sql_query"), move || {
             apply_per_call_gucs(readonly, timeout_ms)?;
             render::run_to_table(&query_owned, max_rows_copy, &sensitive_clone)
                 .map_err(crate::infra::errors::AskError::Sql)
-        },
-    );
+        });
     // Flatten AskError -> String so the rest of the function (audit
     // + caller) keeps the same shape as before.
     let result: std::result::Result<RenderedTable, String> =
@@ -208,10 +207,7 @@ fn run_query_to_text(
 /// scoped to the subtxn that runs the user query (see
 /// `apply_per_call_gucs` and the call-site comment in
 /// `run_query_to_text`).
-fn audit_insert_only(
-    query: &str,
-    readonly: bool,
-) -> std::result::Result<Option<Uuid>, String> {
+fn audit_insert_only(query: &str, readonly: bool) -> std::result::Result<Option<Uuid>, String> {
     Spi::connect_mut(|client| -> std::result::Result<Option<Uuid>, String> {
         // SECURITY DEFINER helper so PUBLIC doesn't need INSERT on
         // _sql_audit (C3); returns the uuid via RETURNING.
@@ -222,10 +218,13 @@ fn audit_insert_only(
                 &[query.into(), (-1i32).into(), readonly.into()],
             )
             .map_err(|e| e.to_string())?;
-        let audit_id = tup
-            .into_iter()
-            .next()
-            .and_then(|row| row.get_datum_by_ordinal(1).ok()?.value::<Uuid>().ok().flatten());
+        let audit_id = tup.into_iter().next().and_then(|row| {
+            row.get_datum_by_ordinal(1)
+                .ok()?
+                .value::<Uuid>()
+                .ok()
+                .flatten()
+        });
         Ok(audit_id)
     })
 }
@@ -255,12 +254,7 @@ fn apply_per_call_gucs(
 /// Update the audit row with the query outcome. Best-effort: any failure
 /// inside this fn is logged with `warning!()` rather than propagated
 /// because the user's `ask()` call already has a result.
-fn audit_finish(
-    audit_id: Option<Uuid>,
-    readonly: bool,
-    latency_ms: i64,
-    error: Option<&String>,
-) {
+fn audit_finish(audit_id: Option<Uuid>, readonly: bool, latency_ms: i64, error: Option<&String>) {
     let Some(id) = audit_id else {
         // Phase 1 didn't get an id back — nothing to update. The insert
         // itself may still have happened (returning rows in pgrx can
@@ -301,11 +295,7 @@ fn audit_finish(
             .update(
                 "SELECT ask._sql_audit_finish($1, $2, $3)",
                 None,
-                &[
-                    id.into(),
-                    latency_ms.into(),
-                    error_owned.as_deref().into(),
-                ],
+                &[id.into(), latency_ms.into(), error_owned.as_deref().into()],
             )
             .map_err(|e| e.to_string())?;
         Ok(())

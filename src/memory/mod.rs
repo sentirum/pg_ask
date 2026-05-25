@@ -31,11 +31,7 @@ use serde_json::Value;
 pub use store::{Hit, MemoryRow, NamespaceCount};
 
 /// Insert a new memory row. Returns its id.
-pub fn remember(
-    content: &str,
-    namespace: Option<&str>,
-    metadata: Option<Value>,
-) -> Result<Uuid> {
+pub fn remember(content: &str, namespace: Option<&str>, metadata: Option<Value>) -> Result<Uuid> {
     let cfg = RuntimeConfig::load()?;
     remember_with_cfg(&cfg, content, namespace, metadata)
 }
@@ -69,11 +65,7 @@ pub fn remember_with_cfg(
 /// Look up the top-N hits for a free-text query. Combines vector and
 /// full-text scores; the blend weight is configurable per session via
 /// `SET LOCAL pg_ask.memory_search_alpha = ...`.
-pub fn recall(
-    query: &str,
-    namespace: Option<&str>,
-    limit: usize,
-) -> Result<Vec<Hit>> {
+pub fn recall(query: &str, namespace: Option<&str>, limit: usize) -> Result<Vec<Hit>> {
     let cfg = RuntimeConfig::load()?;
     recall_with_cfg(&cfg, query, namespace, limit)
 }
@@ -117,11 +109,7 @@ pub fn forget(id: Uuid) -> Result<bool> {
 /// Browse stored memories — owner-scoped, newest-first. Unlike
 /// [`recall`] this does not embed anything; it is a plain catalog read.
 /// `limit` is clamped inside the store to `[1, 200]`.
-pub fn list(
-    namespace: Option<&str>,
-    limit: usize,
-    offset: usize,
-) -> Result<Vec<MemoryRow>> {
+pub fn list(namespace: Option<&str>, limit: usize, offset: usize) -> Result<Vec<MemoryRow>> {
     let cfg = RuntimeConfig::load()?;
     ensure_memory_available(&cfg)?;
     store::list_memories(namespace, limit, offset)
@@ -157,9 +145,8 @@ fn ensure_memory_available(cfg: &RuntimeConfig) -> Result<()> {
     // "pgvector missing" and the "table missing" cases. We still
     // surface a distinct error message for missing pgvector because the
     // operator action is different (install the extension vs. nothing).
-    let bootstrapped: Option<bool> =
-        pgrx::Spi::get_one("SELECT ask._memory_bootstrap()")
-            .map_err(|e| AskError::Sql(format!("_memory_bootstrap: {e}")))?;
+    let bootstrapped: Option<bool> = pgrx::Spi::get_one("SELECT ask._memory_bootstrap()")
+        .map_err(|e| AskError::Sql(format!("_memory_bootstrap: {e}")))?;
     if !bootstrapped.unwrap_or(false) {
         return Err(AskError::Sql(
             "memory layer requires pgvector — run `CREATE EXTENSION vector;` first".into(),

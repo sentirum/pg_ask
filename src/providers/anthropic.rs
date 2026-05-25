@@ -30,7 +30,10 @@ impl AnthropicProvider {
         Self {
             http,
             api_key: cfg.api_key.clone(),
-            model: cfg.model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            model: cfg
+                .model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             base_url: cfg
                 .base_url
                 .clone()

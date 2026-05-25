@@ -41,10 +41,7 @@ pub fn summarize(plan_json: &Value) -> Option<PlanSummary> {
 
     walk(root, &mut tables, &mut warnings);
 
-    let est_rows = root
-        .get("Plan Rows")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(-1);
+    let est_rows = root.get("Plan Rows").and_then(|v| v.as_i64()).unwrap_or(-1);
 
     if est_rows > HUGE_ROWS {
         warnings.insert(
@@ -75,11 +72,11 @@ fn walk(node: &Value, tables: &mut BTreeSet<String>, warnings: &mut Vec<String>)
 
     // Heuristic warnings on this node.
     if let Some(node_type) = node.get("Node Type").and_then(|v| v.as_str()) {
-        let rows = node
-            .get("Plan Rows")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let rel = node.get("Relation Name").and_then(|v| v.as_str()).unwrap_or("");
+        let rows = node.get("Plan Rows").and_then(|v| v.as_i64()).unwrap_or(0);
+        let rel = node
+            .get("Relation Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         match node_type {
             "Seq Scan" if rows > WIDE_SCAN_ROWS => {
@@ -162,7 +159,10 @@ mod tests {
         );
         // First warning should be the high root estimate, then Seq Scan.
         assert!(s.warnings[0].contains("estimated row count is high"));
-        assert!(s.warnings.iter().any(|w| w.contains("Seq Scan on `orders`")));
+        assert!(s
+            .warnings
+            .iter()
+            .any(|w| w.contains("Seq Scan on `orders`")));
     }
 
     #[test]

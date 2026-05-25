@@ -1,6 +1,6 @@
 [package]
 name = "pg_ask"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 license = "PostgreSQL"
 description = "PostgreSQL extension that turns natural language questions into agent-driven SQL — ask your database in English (or any language)."
@@ -29,13 +29,18 @@ serde = { version = "1", features = ["derive"] }
 # order when rendering query results to the model.
 serde_json = { version = "1", features = ["preserve_order"] }
 # Blocking HTTP — pgrx fonksiyonları sync; PG backend tek thread, async runtime istemiyoruz.
-ureq = { version = "2.10", features = ["json", "tls"] }
+# ureq 3.x has a redesigned API (typestate builder, body iter, error
+# variants); the wrapper in src/infra/http.rs hides the migration from
+# the rest of the crate. We pin to 3 and pull in `json` for serde
+# integration; `rustls` is the default TLS provider as of 3.x and
+# matches what we had in 2.x (no native-tls in either build).
+ureq = { version = "3", features = ["json", "rustls"] }
 # `url` powers host-based allow-list parsing in tools::http_fetch (C5
 # SSRF fix). We need real RFC 3986 parsing rather than `starts_with`
 # string matching, which previously let `api.openai.com.evil.com` slip
 # past a `https://api.openai.com` allow entry.
 url = "2"
-thiserror = "1"
+thiserror = "2"
 # Real SQL parser for sql_guard (v0.5). Replaces the token-based matcher
 # for statement-type classification while keeping the lexer for function
 # denylist checks.

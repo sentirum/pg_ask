@@ -30,9 +30,7 @@ pub fn register() {
 #[pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn pg_ask_worker_main(_arg: pg_sys::Datum) {
-    BackgroundWorker::attach_signal_handlers(
-        SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM,
-    );
+    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
     BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
 
     log!("pg_ask worker started");

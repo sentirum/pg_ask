@@ -79,9 +79,8 @@ pub fn single_statement(tokens: &[Token<'_>]) -> Result<()> {
 }
 
 pub fn starts_with_allowed_verb(tokens: &[Token<'_>], mode: GuardMode) -> Result<()> {
-    let first = first_word(tokens).ok_or_else(|| {
-        AskError::GuardRejected("could not find a leading SQL verb".into())
-    })?;
+    let first = first_word(tokens)
+        .ok_or_else(|| AskError::GuardRejected("could not find a leading SQL verb".into()))?;
     let lower = first.to_ascii_lowercase();
 
     if lower == BANNED_LEAD_KEYWORD {
@@ -93,8 +92,7 @@ pub fn starts_with_allowed_verb(tokens: &[Token<'_>], mode: GuardMode) -> Result
     let allowed = match mode {
         GuardMode::Readonly => READONLY_VERBS.contains(&lower.as_str()),
         GuardMode::Writable => {
-            READONLY_VERBS.contains(&lower.as_str())
-                || WRITE_VERBS.contains(&lower.as_str())
+            READONLY_VERBS.contains(&lower.as_str()) || WRITE_VERBS.contains(&lower.as_str())
         }
     };
     if !allowed {

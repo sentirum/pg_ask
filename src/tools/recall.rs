@@ -38,7 +38,8 @@ impl Tool for RecallTool {
                 notes, preferences, or facts relevant to a query. Use this to look \
                 up context that may not be in the current conversation — user \
                 preferences, definitions, prior conclusions. Returns up to 25 hits \
-                ranked by hybrid (vector + full-text) similarity.".to_string(),
+                ranked by hybrid (vector + full-text) similarity."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -102,8 +103,14 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 fn ok(text: String) -> ToolOutput {
-    ToolOutput { text, is_error: false }
+    ToolOutput {
+        text,
+        is_error: false,
+    }
 }
 fn err(msg: &str) -> ToolOutput {
-    ToolOutput { text: msg.to_string(), is_error: true }
+    ToolOutput {
+        text: msg.to_string(),
+        is_error: true,
+    }
 }

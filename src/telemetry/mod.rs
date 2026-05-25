@@ -161,10 +161,7 @@ pub fn write(rec: &TraceRecord) {
         }
     };
 
-    let result = Spi::run_with_args(
-        "SELECT ask._write_trace($1::jsonb)",
-        &[payload_text.into()],
-    );
+    let result = Spi::run_with_args("SELECT ask._write_trace($1::jsonb)", &[payload_text.into()]);
     if let Err(e) = result {
         pgrx::warning!("pg_ask telemetry: failed to insert trace row: {e}");
     }

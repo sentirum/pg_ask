@@ -93,17 +93,21 @@ fn list_memories(
         name!(created_at_iso, String),
     ),
 > {
-    let rows = match memory::list(
-        namespace,
-        limit_n.max(1) as usize,
-        offset_n.max(0) as usize,
-    ) {
+    let rows = match memory::list(namespace, limit_n.max(1) as usize, offset_n.max(0) as usize) {
         Ok(r) => r,
         Err(e) => error!("ask.list_memories: {e}"),
     };
     let materialised: Vec<_> = rows
         .into_iter()
-        .map(|r| (r.id, r.namespace, r.content, pgrx::Json(r.metadata), r.created_at_iso))
+        .map(|r| {
+            (
+                r.id,
+                r.namespace,
+                r.content,
+                pgrx::Json(r.metadata),
+                r.created_at_iso,
+            )
+        })
         .collect();
     TableIterator::new(materialised.into_iter())
 }
@@ -111,10 +115,7 @@ fn list_memories(
 /// Enumerate namespaces the caller has populated, with row counts.
 /// Ordered by row count desc — a good "what is in here?" probe.
 #[pg_extern(schema = "ask", stable, parallel_safe)]
-fn list_namespaces() -> TableIterator<
-    'static,
-    (name!(namespace, String), name!(n, i64)),
-> {
+fn list_namespaces() -> TableIterator<'static, (name!(namespace, String), name!(n, i64))> {
     let rows = match memory::namespaces() {
         Ok(r) => r,
         Err(e) => error!("ask.list_namespaces: {e}"),

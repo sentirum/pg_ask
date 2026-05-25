@@ -47,9 +47,7 @@ const SECRET_KEYS: &[&str] = &["api_key", "embedding_api_key"];
 const REDACTED: &str = "***redacted***";
 
 fn is_secret(key: &str) -> bool {
-    SECRET_KEYS
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case(key))
+    SECRET_KEYS.iter().any(|s| s.eq_ignore_ascii_case(key))
 }
 
 /// Persist a config key/value pair in `ask._config`.
@@ -73,7 +71,19 @@ fn config(key: &str, value: &str) -> bool {
 /// Secret keys (see `SECRET_KEYS`) always return `'***redacted***'`
 /// when a value is set, never the raw value. To inspect the actual
 /// secret, query `ask._config` directly as a superuser.
-#[pg_extern(schema = "ask", stable, parallel_restricted)]
+///
+/// ## C3-bis (Gemini v0.5.2 review item 1.4)
+///
+/// Marked `SECURITY DEFINER` for the same reason `config(...)` is:
+/// v0.5.2 added `REVOKE ALL ON ask._config FROM PUBLIC` (C6 hardening),
+/// which made the previous SECURITY INVOKER version raise
+/// `permission denied for table _config` for every non-superuser
+/// caller. Redaction still runs on the Rust side after the read so
+/// the definer privileges only buy us table access, not a way to
+/// leak secrets — `is_secret()` collapses the value to
+/// `'***redacted***'` for the `api_key` / `embedding_api_key`
+/// entries before returning, exactly as before.
+#[pg_extern(schema = "ask", security_definer, stable, parallel_restricted)]
 fn get_config(key: &str) -> Option<String> {
     let raw = match config::read_table(key) {
         Ok(v) => v,

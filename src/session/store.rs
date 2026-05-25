@@ -1,12 +1,21 @@
 //! SPI primitives backing `session/mod.rs`.
 //!
-//! Every read or write is parameterised — no string concatenation with
-//! user-supplied values. The `owner` column is treated as authoritative:
-//! we never read it from the caller, we always compare against
-//! `current_user` inside the SQL itself.
+//! Wave 4 / C2-bis (Gemini v0.5.2 review): every read and write goes
+//! through a SECURITY DEFINER helper in `ask._session_*`. The previous
+//! implementation issued direct `INSERT INTO ask._sessions / _messages`
+//! through SPI, which started failing in v0.5.2 once
+//! `REVOKE ALL ON ask._sessions FROM PUBLIC` was added — non-superuser
+//! callers got `permission denied for table _sessions` on the very
+//! first `ask.create_session(...)` call.
 //!
-//! All multi-row writes happen inside a single `Spi::connect_mut` scope
-//! so a half-appended message list cannot survive a mid-loop error.
+//! Each helper enforces session_user ownership inside its body, so the
+//! Rust side can call them without first proving caller identity. We
+//! still re-check ownership at the Rust layer (`session::assert_owned`)
+//! so the higher-level API surfaces the same `SessionError::NotFound`
+//! regardless of which read path tripped.
+//!
+//! Every read or write is parameterised — no string concatenation with
+//! user-supplied values.
 
 use crate::infra::errors::{AskError, Result};
 use crate::providers::{Message, MessageContent, Role};
@@ -29,26 +38,16 @@ pub struct MessageRow {
 }
 
 pub fn insert_session(label: Option<&str>) -> Result<Uuid> {
-    // RETURNING id keeps us from having to gen_random_uuid() on the Rust
-    // side, which would need an extra dependency.
-    let id: Option<Uuid> = if let Some(l) = label {
-        Spi::get_one_with_args(
-            "INSERT INTO ask._sessions(label) VALUES ($1) RETURNING id",
-            &[l.into()],
-        )?
-    } else {
-        Spi::get_one("INSERT INTO ask._sessions DEFAULT VALUES RETURNING id")?
-    };
-    id.ok_or_else(|| AskError::Sql("INSERT INTO _sessions returned no id".into()))
+    // The helper accepts NULL for an unlabeled session — pgrx maps
+    // Option::<&str>::None to a NULL text datum.
+    let id: Option<Uuid> =
+        Spi::get_one_with_args("SELECT ask._session_create($1)", &[label.into()])?;
+    id.ok_or_else(|| AskError::Sql("ask._session_create returned no id".into()))
 }
 
 pub fn is_owned_by_current_user(session_id: Uuid) -> Result<bool> {
-    let found: Option<bool> = Spi::get_one_with_args(
-        "SELECT TRUE
-           FROM ask._sessions
-          WHERE id = $1 AND owner = current_user",
-        &[session_id.into()],
-    )?;
+    let found: Option<bool> =
+        Spi::get_one_with_args("SELECT ask._session_is_owned($1)", &[session_id.into()])?;
     Ok(found.unwrap_or(false))
 }
 
@@ -56,11 +55,13 @@ pub fn fetch_messages(session_id: Uuid) -> Result<Vec<MessageRow>> {
     let mut out: Vec<MessageRow> = Vec::new();
 
     Spi::connect(|client| -> Result<()> {
+        // The helper joins to `_sessions` and filters by session_user
+        // owner, so a caller who doesn't own this session simply sees
+        // an empty result — matching the "NotFound == Unauthorized"
+        // contract the higher-level session::assert_owned relies on.
         let rows = client.select(
-            "SELECT role, content, tool_calls::text, tool_call_id, is_error
-               FROM ask._messages
-              WHERE session_id = $1
-              ORDER BY idx",
+            "SELECT role, content, tool_calls, tool_call_id, is_error
+               FROM ask._session_fetch_messages($1)",
             None,
             &[session_id.into()],
         )?;
@@ -109,76 +110,61 @@ pub fn append(session_id: Uuid, messages: &[Message]) -> Result<()> {
     }
 
     Spi::connect_mut(|client| -> Result<()> {
-        // C7 (v0.5.2 review): the previous implementation read
-        // `MAX(idx) + 1` into Rust and then issued the INSERT — two
-        // statements, so two concurrent `ask.chat()` calls against the
-        // same session would both compute the same next index and the
-        // second INSERT would fail on the (session_id, idx) primary
-        // key (or worse, succeed if the PK were ever relaxed).
+        // C7 (v0.5.2 review): take a session-scoped transactional
+        // advisory lock BEFORE any read, so two concurrent ask.chat()
+        // calls against the same session can't both compute the same
+        // next idx and trip the (session_id, idx) primary key. The
+        // lock is released at end of (sub)transaction.
         //
-        // We now take a session-scoped transactional advisory lock
-        // *before* any read. The lock is keyed on the session UUID
-        // (hashed to a bigint with hashtextextended); it's released
-        // automatically at end of transaction. Cross-session appends
-        // don't contend because they hash to different keys (modulo
-        // birthday collisions, which only cost a brief wait — they
-        // can't corrupt data).
-        //
-        // We also derive the next idx atomically inside each INSERT
-        // using a CTE, so even if the lock were absent the write
-        // itself is consistent against the current state. The lock is
-        // belt-and-braces against the loop-of-inserts case where two
-        // sessions interleaving could otherwise produce gappy or
-        // duplicated indices.
+        // The append helper *also* derives the next idx atomically
+        // inside its INSERT-SELECT, so even without the lock each
+        // individual write is consistent against its own snapshot.
+        // The lock is belt-and-braces for the loop-of-inserts case
+        // where two appenders could otherwise interleave.
         client.update(
-            "SELECT pg_advisory_xact_lock(\n             hashtextextended('ask._messages:' || $1::text, 0)\n           )",
+            "SELECT ask._session_lock_for_append($1)",
             None,
             &[session_id.into()],
         )?;
 
         for msg in messages {
             let (role, content, tool_calls, tool_call_id, is_error) = encode(msg);
-            let tc_owned: Option<String> = tool_calls.map(|v| v.to_string());
+            // The helper takes the jsonb tool_calls as text and casts
+            // inside its body (NULLIF empty string → NULL jsonb), so
+            // we never have to thread a jsonb datum through pgrx for
+            // the empty-call case.
+            let tc_text: Option<String> = tool_calls.map(|v| v.to_string());
 
-            // Single-statement append: derive next idx from the table
-            // itself in the same INSERT. This is consistent under our
-            // transaction snapshot (advisory lock above serialises
-            // writers for the same session, so MAX(idx) we observe is
-            // the actual highest committed/in-flight idx for this txn).
             client.update(
-                "INSERT INTO ask._messages
-                    (session_id, idx, role, content, tool_calls, tool_call_id, is_error)
-                 SELECT $1,
-                        COALESCE(MAX(idx), -1) + 1,
-                        $2, $3, $4::jsonb, $5, $6
-                   FROM ask._messages
-                  WHERE session_id = $1",
+                "SELECT ask._session_append_message($1, $2, $3, $4, $5, $6)",
                 None,
                 &[
                     session_id.into(),
                     role.into(),
                     content.into(),
-                    tc_owned.as_deref().into(),
+                    tc_text.as_deref().into(),
                     tool_call_id.as_deref().into(),
                     is_error.into(),
                 ],
             )?;
         }
 
-        // Touch updated_at so listings sort sensibly.
-        client.update(
-            "UPDATE ask._sessions SET updated_at = now() WHERE id = $1",
-            None,
-            &[session_id.into()],
-        )?;
+        // Touch updated_at so listings sort sensibly. Pulled out of
+        // the append loop so listing performance doesn't pay for
+        // every message in a multi-message turn.
+        client.update("SELECT ask._session_touch($1)", None, &[session_id.into()])?;
 
         Ok(())
     })
 }
 
 pub fn clear_messages(session_id: Uuid) -> Result<()> {
+    // The helper filters on `s.owner = session_user` inside its USING
+    // join, so a non-owner who guesses an id simply deletes nothing —
+    // same observable outcome as a real miss, matching the
+    // NotFound == Unauthorized convention.
     Spi::run_with_args(
-        "DELETE FROM ask._messages WHERE session_id = $1",
+        "SELECT ask._session_clear_messages($1)",
         &[session_id.into()],
     )?;
     Ok(())
@@ -186,7 +172,15 @@ pub fn clear_messages(session_id: Uuid) -> Result<()> {
 
 // ---------- helpers ----------
 
-fn encode(msg: &Message) -> (&'static str, String, Option<Value>, Option<String>, Option<bool>) {
+fn encode(
+    msg: &Message,
+) -> (
+    &'static str,
+    String,
+    Option<Value>,
+    Option<String>,
+    Option<bool>,
+) {
     match (&msg.role, &msg.content) {
         (Role::User, MessageContent::Text(t)) => ("user", t.clone(), None, None, None),
         (Role::Assistant, MessageContent::Text(t)) => ("assistant", t.clone(), None, None, None),

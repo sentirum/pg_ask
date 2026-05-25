@@ -88,8 +88,11 @@ pub fn default_toolset(
         statement_timeout_ms: cfg.tool_statement_timeout_ms,
         sensitive_columns: cfg.sensitive_columns.clone(),
     }));
-    // Append any user-defined tools registered by the caller.
-    if let Ok(user_tools) = load_user_tools() {
+    // Append any user-defined tools registered by the caller. HP1
+    // (Gemini v0.5.2 review item 1.2): each tool carries the same
+    // readonly + statement_timeout snapshot as the built-ins, so the
+    // subtxn that runs the body honours them.
+    if let Ok(user_tools) = load_user_tools(cfg.readonly, cfg.tool_statement_timeout_ms) {
         for t in user_tools {
             tools.push(Box::new(t));
         }
@@ -100,7 +103,15 @@ pub fn default_toolset(
 /// Load user-defined tools from `ask._tools` for the current role.
 /// Silently returns an empty vec on SPI failure so a broken _tools table
 /// does not crash the agent loop.
-pub fn load_user_tools() -> Result<Vec<user_defined::UserDefinedTool>> {
+///
+/// `readonly` and `statement_timeout_ms` are baked into every returned
+/// `UserDefinedTool` so HP1 (subtxn + per-call GUCs) has the policy
+/// it needs without a second config load per tool invocation. Threaded
+/// from the surrounding `RuntimeConfig` snapshot at the caller.
+pub fn load_user_tools(
+    readonly: bool,
+    statement_timeout_ms: u64,
+) -> Result<Vec<user_defined::UserDefinedTool>> {
     let mut out: Vec<user_defined::UserDefinedTool> = Vec::new();
 
     Spi::connect(|client| -> Result<()> {
@@ -150,6 +161,8 @@ pub fn load_user_tools() -> Result<Vec<user_defined::UserDefinedTool>> {
                     description,
                     input_schema,
                 },
+                readonly,
+                statement_timeout_ms,
             });
         }
         Ok(())

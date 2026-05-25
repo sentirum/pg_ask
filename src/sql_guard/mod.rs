@@ -76,7 +76,9 @@ pub fn validate(sql: &str, mode: GuardMode) -> Result<ValidatedSql<'_>> {
 
 // ---------- v0.5 real parser ----------
 
-fn parse_ast(sql: &str) -> std::result::Result<Vec<sqlparser::ast::Statement>, sqlparser::parser::ParserError> {
+fn parse_ast(
+    sql: &str,
+) -> std::result::Result<Vec<sqlparser::ast::Statement>, sqlparser::parser::ParserError> {
     use sqlparser::dialect::PostgreSqlDialect;
     use sqlparser::parser::Parser;
     let dialect = PostgreSqlDialect {};
@@ -85,9 +87,7 @@ fn parse_ast(sql: &str) -> std::result::Result<Vec<sqlparser::ast::Statement>, s
 
 fn ast_checks(stmts: &[sqlparser::ast::Statement], mode: GuardMode) -> Result<()> {
     if stmts.len() != 1 {
-        return Err(AskError::GuardRejected(
-            "only one statement allowed".into(),
-        ));
+        return Err(AskError::GuardRejected("only one statement allowed".into()));
     }
 
     // C8 (v0.5.2 review): walk every relation and function call in the
@@ -139,7 +139,9 @@ fn classify_statement(stmt: &sqlparser::ast::Statement, mode: GuardMode) -> Resu
         // FROM users` would slip past in readonly mode (ANALYZE actually
         // runs the inner statement). Recurse into the wrapped statement
         // with the same mode so all the other guards apply.
-        Statement::Explain { statement, analyze, .. } => {
+        Statement::Explain {
+            statement, analyze, ..
+        } => {
             // Even without ANALYZE, EXPLAIN can have side effects on
             // some statements (write CTEs evaluate). Re-classify the
             // inner statement unconditionally; if it's a plain SELECT
@@ -147,13 +149,9 @@ fn classify_statement(stmt: &sqlparser::ast::Statement, mode: GuardMode) -> Resu
             let _ = analyze;
             classify_statement(statement, mode)
         }
-        Statement::Copy { .. } => Err(AskError::GuardRejected(
-            "COPY is not allowed".into(),
-        )),
+        Statement::Copy { .. } => Err(AskError::GuardRejected("COPY is not allowed".into())),
         // Write shapes — permitted only in writable mode
-        Statement::Insert(_)
-        | Statement::Update { .. }
-        | Statement::Delete(_) => {
+        Statement::Insert(_) | Statement::Update { .. } | Statement::Delete(_) => {
             if mode == GuardMode::Readonly {
                 Err(AskError::GuardRejected(
                     "write statements are not allowed in readonly mode".into(),
@@ -227,9 +225,10 @@ fn check_query_for_writes(query: &sqlparser::ast::Query) -> Result<()> {
 /// quote bypass that fooled the token-level checker doesn't apply.
 mod secrets_visitor {
     use crate::infra::errors::{AskError, Result};
-    use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
-                          FunctionArguments, ObjectName, Statement, Value, ValueWithSpan,
-                          Visit, Visitor};
+    use sqlparser::ast::{
+        Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments,
+        ObjectName, Statement, Value, ValueWithSpan, Visit, Visitor,
+    };
     use std::ops::ControlFlow;
 
     /// Catalog views that expose GUC values. Reading any of these from
@@ -243,8 +242,8 @@ mod secrets_visitor {
         "pg_db_role_setting",
         "pg_hba_file_rules",
         "pg_ident_file_mappings",
-        "pg_shadow",    // password hashes
-        "pg_authid",    // ditto
+        "pg_shadow", // password hashes
+        "pg_authid", // ditto
         "pg_user_mapping",
     ];
 
@@ -281,7 +280,10 @@ mod secrets_visitor {
             // identifiers (e.g. `"pg_settings"` → `"pg_settings"`).
             // Strip them so the comparison normalises.
             let normalized = last.trim_matches('"');
-            if BANNED_RELATIONS.iter().any(|b| b.eq_ignore_ascii_case(normalized)) {
+            if BANNED_RELATIONS
+                .iter()
+                .any(|b| b.eq_ignore_ascii_case(normalized))
+            {
                 return ControlFlow::Break(format!(
                     "access to system catalog `{normalized}` is not allowed (would expose GUCs / secrets)"
                 ));
@@ -305,7 +307,10 @@ mod secrets_visitor {
         // ignore the schema — same reasoning as relations above.
         let name = func.name.0.last()?.to_string().to_ascii_lowercase();
         let normalized = name.trim_matches('"');
-        if !GUC_FUNCTIONS.iter().any(|f| f.eq_ignore_ascii_case(normalized)) {
+        if !GUC_FUNCTIONS
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case(normalized))
+        {
             return None;
         }
 
@@ -336,11 +341,7 @@ mod secrets_visitor {
     /// poking at extension config no matter whose extension it is.
     fn is_protected_guc(name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
-        const PROTECTED_PREFIXES: &[&str] = &[
-            "pg_ask.",
-            "vault.",
-            "app.secrets.",
-        ];
+        const PROTECTED_PREFIXES: &[&str] = &["pg_ask.", "vault.", "app.secrets."];
         PROTECTED_PREFIXES.iter().any(|p| lower.starts_with(p))
     }
 
@@ -360,9 +361,9 @@ mod secrets_visitor {
                 | Value::DoubleQuotedString(s)
                 | Value::EscapedStringLiteral(s)
                 | Value::NationalStringLiteral(s)
-                | Value::DollarQuotedString(sqlparser::ast::DollarQuotedString { value: s, .. }) => {
-                    Some(s.clone())
-                }
+                | Value::DollarQuotedString(sqlparser::ast::DollarQuotedString {
+                    value: s, ..
+                }) => Some(s.clone()),
                 _ => None,
             },
             _ => None,
@@ -403,7 +404,7 @@ mod banned_funcs_visitor {
         "pg_cancel_backend",
         "pg_reload_conf",
         "pg_rotate_logfile",
-        "pg_advisory_lock",        // ours: ask should not be holding session-scope locks
+        "pg_advisory_lock", // ours: ask should not be holding session-scope locks
         "pg_advisory_unlock_all",
     ];
 
@@ -474,16 +475,22 @@ mod tests {
         // C8 (v0.5.2 review): model probing extension secrets via the
         // GUC layer is blocked at AST level.
         assert!(rejected("SELECT current_setting('pg_ask.api_key')"));
-        assert!(rejected("SELECT current_setting('pg_ask.embedding_api_key')"));
+        assert!(rejected(
+            "SELECT current_setting('pg_ask.embedding_api_key')"
+        ));
         // Quoted-identifier bypass that the lexer-level deny list
         // misses: AST walker normalises the identifier.
         assert!(rejected("SELECT \"current_setting\"('pg_ask.api_key')"));
         // Schema-qualified call form.
-        assert!(rejected("SELECT pg_catalog.current_setting('pg_ask.api_key')"));
+        assert!(rejected(
+            "SELECT pg_catalog.current_setting('pg_ask.api_key')"
+        ));
         // Dynamic name composition falls closed (we can't see the literal).
         assert!(rejected("SELECT current_setting('pg_ask.' || 'api_key')"));
         // set_config writes to the same namespace — blocked too.
-        assert!(rejected("SELECT set_config('pg_ask.api_key', 'sk-evil', false)"));
+        assert!(rejected(
+            "SELECT set_config('pg_ask.api_key', 'sk-evil', false)"
+        ));
     }
 
     #[test]
@@ -542,8 +549,12 @@ mod tests {
         // these. The AST walker normalises identifiers, so quoted and
         // schema-qualified calls fall on the same code path.
         assert!(rejected("SELECT \"pg_sleep\"(60)"));
-        assert!(rejected("SELECT pg_catalog.\"pg_read_file\"('/etc/passwd')"));
-        assert!(rejected("SELECT \"pg_catalog\".\"dblink\"('host=evil', 'select 1')"));
+        assert!(rejected(
+            "SELECT pg_catalog.\"pg_read_file\"('/etc/passwd')"
+        ));
+        assert!(rejected(
+            "SELECT \"pg_catalog\".\"dblink\"('host=evil', 'select 1')"
+        ));
         // Identifier casing variations.
         assert!(rejected("SELECT PG_SLEEP(60)"));
         assert!(rejected("SELECT Pg_Sleep(60)"));
@@ -551,7 +562,9 @@ mod tests {
 
     #[test]
     fn rejects_pg_settings_and_friends() {
-        assert!(rejected("SELECT setting FROM pg_settings WHERE name = 'pg_ask.api_key'"));
+        assert!(rejected(
+            "SELECT setting FROM pg_settings WHERE name = 'pg_ask.api_key'"
+        ));
         assert!(rejected("SELECT * FROM pg_catalog.pg_settings"));
         assert!(rejected("SELECT * FROM pg_file_settings"));
         assert!(rejected("SELECT * FROM pg_db_role_setting"));

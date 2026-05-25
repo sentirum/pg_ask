@@ -6,11 +6,7 @@
 
 use crate::tools::{Tool, ToolOutput};
 
-pub fn dispatch(
-    tools: &[Box<dyn Tool>],
-    name: &str,
-    args: &serde_json::Value,
-) -> ToolOutput {
+pub fn dispatch(tools: &[Box<dyn Tool>], name: &str, args: &serde_json::Value) -> ToolOutput {
     let Some(tool) = tools.iter().find(|t| t.spec().name == name) else {
         return ToolOutput {
             text: format!("unknown tool `{name}`"),

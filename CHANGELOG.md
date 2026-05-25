@@ -9,6 +9,125 @@ treats internal Rust modules as private regardless of `pub` visibility.
 Upgrade scripts ship as `sql/pg_ask--<from>--<to>.sql` and run
 automatically under `ALTER EXTENSION pg_ask UPDATE`.
 
+## [0.5.3] — 2026-05-26 — Regression-fix release for v0.5.2 hardening
+
+A single-purpose patch release. v0.5.2's hardening sweep introduced
+four observable regressions for non-superuser callers (two of them
+shipping blockers in multi-tenant deployments) and missed one
+performance regression in `hybrid_search`. The findings came from a
+Gemini code review of the v0.5.2 artefacts; each item was reproduced
+live against the demo database with a dedicated `pgask_test_user`
+role before the fix landed, and re-verified after.
+
+All fixes are minimal in scope. The public surface
+(`ask.*` function signatures, `pg_ask.*` GUCs, internal table
+shapes) is unchanged from v0.5.2. Test count holds at **75 green**,
+plus an end-to-end non-superuser anaphora canary that runs through
+the ZAI Anthropic endpoint with GLM-5.1 (`7 → ×3 = 21 → +5 = 26 →
+÷2 = 13`).
+
+### Regression fixes
+
+- **C2-bis** — *Session feature unusable for non-superusers.*
+  `ask.create_session` / `chat` / `clear_session` were
+  `SECURITY INVOKER` `pg_extern`s that issued direct INSERT /
+  UPDATE / DELETE on `ask._sessions` and `ask._messages`. The
+  v0.5.2 `REVOKE ALL ON ask._sessions FROM PUBLIC` turned every
+  non-superuser call into `ERROR: permission denied for table
+  _sessions`. Fix: a family of SECURITY DEFINER helpers
+  (`ask._session_create`, `_session_is_owned`,
+  `_session_fetch_messages`, `_session_lock_for_append`,
+  `_session_append_message`, `_session_touch`,
+  `_session_clear_messages`) mirror the existing `_memory_*` /
+  `_tool_*` / `_sql_audit_*` family. The Rust caller
+  (`src/session/store.rs`) was rewritten to call only these
+  helpers. Each enforces `session_user` ownership inside its body,
+  so EXECUTE-to-PUBLIC stays safe.
+
+- **C3-bis** — *`ask.get_config` unusable for non-superusers.*
+  `config(key, value)` was SECURITY DEFINER in v0.5.2 but its
+  read sibling `get_config(key)` stayed SECURITY INVOKER. Combined
+  with `REVOKE ALL ON ask._config FROM PUBLIC` that meant every
+  `get_config()` call from a non-superuser returned
+  `permission denied for table _config`. Fix on two levels: the
+  Rust `#[pg_extern]` now annotates `security_definer`, and the
+  internal `RuntimeConfig::load` path routes through a new
+  `ask._config_get(lookup_key)` SECURITY DEFINER helper (so the
+  agent's own provider / model / api_key lookups inside
+  `ask.chat()` / `ask.ask()` also stop tripping the table grant).
+  Redaction (`is_secret(key) → '***redacted***'`) still runs on the
+  Rust side after the read, so the new `SECURITY DEFINER` shape
+  buys only table access, not a path to leak secrets.
+
+- **HP1** — *User-defined tools lacked subtxn isolation, readonly
+  enforcement, and statement_timeout.* `tools::user_defined::run_planned`
+  ran the operator-blessed body directly through `Spi::connect`, so
+  (a) any Postgres ERROR poisoned the surrounding `ask.ask()`
+  transaction with `current transaction is aborted, commands
+  ignored`, (b) the body could issue DML even when
+  `pg_ask.readonly = on`, and (c) a runaway body had no per-call
+  timeout. Fix mirrors the `sql_query` / `sample_table` pattern:
+  wrap the body in `infra::subtxn::run_in_subtransaction` and apply
+  `SET LOCAL statement_timeout` plus (when readonly)
+  `SET LOCAL transaction_read_only = on` from inside the subtxn
+  so the GUCs auto-revert on release. `UserDefinedTool` carries
+  `readonly` / `statement_timeout_ms` snapshots threaded from
+  `RuntimeConfig` at registration time.
+
+- **H13** — *Schema cache was role-agnostic, leaking views across
+  `SET ROLE`.* `schema::summarize_within` keyed its per-backend
+  cache on `(char_budget, ttl_start)`, but `compute_summary`
+  filters tables through `has_table_privilege(current_user, …)`.
+  Two roles connected through a `SET ROLE` (or a connection pooler
+  re-using backends) could see each other's view for up to 60
+  seconds. Fix: cache key now includes `pg_sys::GetUserId()` so
+  the cache segments by effective role. The unsafe FFI call lives
+  in a wrapper documented alongside `infra::subtxn` (the only two
+  places in the crate that touch raw `pgrx-pg-sys`).
+
+- **HP2** — *`hybrid_search` bypassed the pgvector ANN index.* The
+  H9 fix in v0.5.2 introduced a two-stage hybrid query, but the
+  candidate ORDER BY referenced the query vector through a CTE
+  (`(SELECT vec FROM q)`). pgvector's ivfflat / hnsw plan only
+  triggers when the right-hand side of `<=>` is a literal or a
+  *direct* bind parameter; a subquery looked variable to the
+  planner and forced a sequential scan + sort. Fix: drop the `q`
+  CTE for the vector, reference `$1::vector` directly in every
+  occurrence. The tsquery still goes through a CTE because it's
+  used twice and is non-trivial to recompute, but it sits outside
+  the ORDER BY that drives the index choice.
+
+### Dependencies
+
+- **`ureq` 2.10 → 3** — ureq 3.x is an API redesign
+  (typestate builder, response body via `body_mut().as_reader()`,
+  `StatusCode` error variant no longer carries the response).
+  Migration is hidden inside `src/infra/http.rs`; the public
+  `HttpClient` surface is unchanged, every provider / tool
+  compiles untouched. Pinned to `rustls + json` features to match
+  the 2.x build profile.
+- **`thiserror` 1 → 2** — backwards-compatible upgrade, no code
+  changes required.
+
+### Upgrade notes
+
+`ALTER EXTENSION pg_ask UPDATE TO '0.5.3'` from any 0.5.x. The
+migration script (`sql/pg_ask--0.5.2--0.5.3.sql`) is idempotent
+and includes:
+
+* All seven `ask._session_*` SECURITY DEFINER helpers (idempotent
+  `CREATE OR REPLACE`).
+* `ALTER FUNCTION ask.get_config(text) SECURITY DEFINER` to flip
+  the catalog flag without detaching the function from the
+  extension.
+* `ask._config_get(lookup_key)` SECURITY DEFINER helper for the
+  internal `RuntimeConfig::load` read path.
+* Matching `REVOKE / GRANT EXECUTE` policy.
+
+The Rust-side fixes (HP1, H13, HP2, ureq, thiserror) ship in the
+new `.so` and take effect the moment `ALTER EXTENSION UPDATE`
+swaps the library.
+
 ## [0.5.2] — 2026-05-25 — Hardening release
 
 A pure-hardening release: no new public surface, 25 fixes across

@@ -8,9 +8,7 @@ use super::{dispatch, prompt};
 use crate::infra::config::RuntimeConfig;
 use crate::infra::errors::{AskError, Result};
 use crate::infra::http::HttpClient;
-use crate::providers::{
-    self, Message, MessageContent, ProviderResponse, Role, ToolSpec,
-};
+use crate::providers::{self, Message, MessageContent, ProviderResponse, Role, ToolSpec};
 use crate::schema::{self, SchemaMode};
 use crate::telemetry::ToolCallTrace;
 use crate::tools::{self, Tool};

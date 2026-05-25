@@ -408,6 +408,161 @@ END
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Session writer helpers (C2-bis from the Gemini v0.5.2 review).
+--
+-- ask.create_session / chat / clear_session are SECURITY INVOKER
+-- pg_extern functions, but `REVOKE ALL ON ask._sessions / _messages
+-- FROM PUBLIC` (see grant policy below) makes direct INSERT/UPDATE/
+-- DELETE through SPI fail for non-superusers. These helpers are the
+-- one funnel the Rust caller goes through; each enforces session_user
+-- ownership inside its body so EXECUTE to PUBLIC is safe.
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION ask._session_create(label text)
+RETURNS uuid
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+    INSERT INTO ask._sessions (label, owner)
+    VALUES (label, session_user)
+    RETURNING id;
+$$;
+
+CREATE OR REPLACE FUNCTION ask._session_is_owned(p_session_id uuid)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM ask._sessions
+         WHERE id = p_session_id AND owner = session_user
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION ask._session_fetch_messages(p_session_id uuid)
+RETURNS TABLE (
+    role          text,
+    content       text,
+    tool_calls    text,
+    tool_call_id  text,
+    is_error      boolean
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+STABLE
+AS $$
+    SELECT m.role,
+           m.content,
+           m.tool_calls::text,
+           m.tool_call_id,
+           m.is_error
+      FROM ask._messages m
+      JOIN ask._sessions s ON s.id = m.session_id
+     WHERE m.session_id = p_session_id
+       AND s.owner = session_user
+     ORDER BY m.idx;
+$$;
+
+CREATE OR REPLACE FUNCTION ask._session_lock_for_append(p_session_id uuid)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT pg_advisory_xact_lock(
+        hashtextextended('ask._messages:' || p_session_id::text, 0)
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION ask._session_append_message(
+    p_session_id      uuid,
+    msg_role          text,
+    msg_content       text,
+    tool_calls_text   text,
+    msg_tool_call_id  text,
+    msg_is_error      boolean
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    -- Parameter names are prefixed with `p_` (session_id) / `msg_`
+    -- because plpgsql's name resolution would otherwise treat
+    -- `WHERE session_id = session_id` as `WHERE col = col` (always
+    -- true) and let any role read every other role's history. The
+    -- prefix kills the ambiguity at the cost of a slightly noisier
+    -- helper signature.
+    IF NOT EXISTS (
+        SELECT 1 FROM ask._sessions
+         WHERE id = p_session_id AND owner = session_user
+    ) THEN
+        RAISE EXCEPTION 'no such session for current_user'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    INSERT INTO ask._messages
+        (session_id, idx, role, content, tool_calls, tool_call_id, is_error)
+    SELECT p_session_id,
+           COALESCE(MAX(m.idx), -1) + 1,
+           msg_role,
+           msg_content,
+           NULLIF(tool_calls_text, '')::jsonb,
+           msg_tool_call_id,
+           msg_is_error
+      FROM ask._messages m
+     WHERE m.session_id = p_session_id;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION ask._session_touch(p_session_id uuid)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+    UPDATE ask._sessions
+       SET updated_at = now()
+     WHERE id = p_session_id AND owner = session_user;
+$$;
+
+CREATE OR REPLACE FUNCTION ask._session_clear_messages(p_session_id uuid)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+    DELETE FROM ask._messages m
+     USING ask._sessions s
+     WHERE m.session_id = p_session_id
+       AND s.id = m.session_id
+       AND s.owner = session_user;
+$$;
+
+-- Internal _config reader (C3-bis follow-up). RuntimeConfig::load on
+-- the Rust side resolves provider / model / api_key by calling back
+-- into `read_table`; under v0.5.2's `REVOKE ALL ON ask._config FROM
+-- PUBLIC` policy that SELECT trips `permission denied` for every
+-- non-superuser caller. The helper here is SECURITY DEFINER so the
+-- non-superuser path can still read its own config; the public
+-- `ask.get_config()` continues to redact secret keys on the Rust
+-- side before returning.
+CREATE OR REPLACE FUNCTION ask._config_get(lookup_key text)
+RETURNS text
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+STABLE
+AS $$
+    SELECT value FROM ask._config WHERE key = lookup_key;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Grant policy.
 --
 -- Default: REVOKE everything from PUBLIC, then GRANT SELECT only on
@@ -436,22 +591,38 @@ $grant_memory_select$;
 -- Writer helpers — the only INSERT/UPDATE/DELETE path for internal tables.
 -- Each enforces session_user ownership inside its body, so EXECUTE to
 -- PUBLIC is safe.
-REVOKE ALL ON FUNCTION ask._write_trace(jsonb)                            FROM PUBLIC;
-REVOKE ALL ON FUNCTION ask._sql_audit_insert(text, int, bool, text)       FROM PUBLIC;
-REVOKE ALL ON FUNCTION ask._sql_audit_finish(uuid, bigint, text)          FROM PUBLIC;
-REVOKE ALL ON FUNCTION ask._memory_insert(text, text, jsonb, text)        FROM PUBLIC;
-REVOKE ALL ON FUNCTION ask._memory_delete_owned(uuid)                     FROM PUBLIC;
-REVOKE ALL ON FUNCTION ask._tool_register(text, jsonb, text)              FROM PUBLIC;
-REVOKE ALL ON FUNCTION ask._tool_unregister(text)                         FROM PUBLIC;
-REVOKE ALL ON FUNCTION ask._memory_bootstrap()                            FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._write_trace(jsonb)                         TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._memory_bootstrap()                         TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._sql_audit_insert(text, int, bool, text)    TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._sql_audit_finish(uuid, bigint, text)       TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._memory_insert(text, text, jsonb, text)     TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._memory_delete_owned(uuid)                  TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._tool_register(text, jsonb, text)           TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._tool_unregister(text)                      TO PUBLIC;
+REVOKE ALL ON FUNCTION ask._write_trace(jsonb)                                            FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._sql_audit_insert(text, int, bool, text)                       FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._sql_audit_finish(uuid, bigint, text)                          FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._memory_insert(text, text, jsonb, text)                        FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._memory_delete_owned(uuid)                                     FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._tool_register(text, jsonb, text)                              FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._tool_unregister(text)                                         FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._memory_bootstrap()                                            FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._session_create(text)                                          FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._session_is_owned(uuid)                                        FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._session_fetch_messages(uuid)                                  FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._session_lock_for_append(uuid)                                 FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._session_append_message(uuid, text, text, text, text, bool)    FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._session_touch(uuid)                                           FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._session_clear_messages(uuid)                                  FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._config_get(text)                                              FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._write_trace(jsonb)                                         TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._memory_bootstrap()                                         TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._sql_audit_insert(text, int, bool, text)                    TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._sql_audit_finish(uuid, bigint, text)                       TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._memory_insert(text, text, jsonb, text)                     TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._memory_delete_owned(uuid)                                  TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._tool_register(text, jsonb, text)                           TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._tool_unregister(text)                                      TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._session_create(text)                                       TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._session_is_owned(uuid)                                     TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._session_fetch_messages(uuid)                               TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._session_lock_for_append(uuid)                              TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._session_append_message(uuid, text, text, text, text, bool) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._session_touch(uuid)                                        TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._session_clear_messages(uuid)                               TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._config_get(text)                                           TO PUBLIC;
 
 -- Config-surface lockdown (C6) lives in a finalize SQL block in
 -- `sql/finalize.sql` because pgrx emits the #[pg_extern] config

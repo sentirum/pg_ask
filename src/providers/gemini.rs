@@ -43,7 +43,10 @@ impl GeminiProvider {
         Self {
             http,
             api_key: cfg.api_key.clone(),
-            model: cfg.model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            model: cfg
+                .model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             base_url: cfg
                 .base_url
                 .clone()
@@ -75,12 +78,7 @@ impl Provider for GeminiProvider {
 
 // ---------- Request construction ----------
 
-fn build_request(
-    max_tokens: u32,
-    system: &str,
-    history: &[Message],
-    tools: &[ToolSpec],
-) -> Value {
+fn build_request(max_tokens: u32, system: &str, history: &[Message], tools: &[ToolSpec]) -> Value {
     let contents: Vec<Value> = history.iter().filter_map(message_to_wire).collect();
 
     let mut req = json!({
@@ -240,11 +238,12 @@ struct FunctionCall {
 }
 
 fn parse_response(resp: GenerateResponse) -> Result<ProviderResponse> {
-    let candidate = resp.candidates.into_iter().next().ok_or(AskError::EmptyResponse)?;
-    let parts = candidate
-        .content
-        .map(|c| c.parts)
-        .unwrap_or_default();
+    let candidate = resp
+        .candidates
+        .into_iter()
+        .next()
+        .ok_or(AskError::EmptyResponse)?;
+    let parts = candidate.content.map(|c| c.parts).unwrap_or_default();
 
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -286,7 +285,9 @@ fn parse_response(resp: GenerateResponse) -> Result<ProviderResponse> {
     match combined_text {
         Some(text) => Ok(ProviderResponse::Final { text }),
         None => {
-            let reason = candidate.finish_reason.unwrap_or_else(|| "UNKNOWN".to_string());
+            let reason = candidate
+                .finish_reason
+                .unwrap_or_else(|| "UNKNOWN".to_string());
             Err(AskError::Sql(format!(
                 "Gemini returned no content (finishReason={reason})"
             )))

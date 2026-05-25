@@ -30,9 +30,7 @@ pub enum SessionError {
 impl std::fmt::Display for SessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SessionError::NotFound => {
-                f.write_str("no such session for current_user")
-            }
+            SessionError::NotFound => f.write_str("no such session for current_user"),
         }
     }
 }

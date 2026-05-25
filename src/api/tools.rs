@@ -60,18 +60,12 @@ fn do_unregister(name: &str) -> Result<bool, AskError> {
 
 /// List user-defined tools for the current role.
 #[pg_extern(schema = "ask", stable, parallel_safe)]
-fn list_tools() -> TableIterator<
-    'static,
-    (name!(name, String), name!(spec, pgrx::Json)),
-> {
+fn list_tools() -> TableIterator<'static, (name!(name, String), name!(spec, pgrx::Json))> {
     let rows = match do_list() {
         Ok(r) => r,
         Err(e) => error!("ask.list_tools: {e}"),
     };
-    let materialised: Vec<_> = rows
-        .into_iter()
-        .map(|(n, s)| (n, pgrx::Json(s)))
-        .collect();
+    let materialised: Vec<_> = rows.into_iter().map(|(n, s)| (n, pgrx::Json(s))).collect();
     TableIterator::new(materialised.into_iter())
 }
 

@@ -32,7 +32,8 @@ impl Tool for DescribeTableTool {
                 with their types and any comments. Use this when the system-prompt \
                 schema is too large to include every table and you need to look up a \
                 specific one. Accepts either a fully-qualified `table` (e.g. \
-                \"public.orders\") or separate `schema` and `table` fields.".to_string(),
+                \"public.orders\") or separate `schema` and `table` fields."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -121,9 +122,14 @@ fn render(schema: &str, table: &str, rows: &[ColumnRow]) -> String {
 }
 
 fn ok(text: String) -> ToolOutput {
-    ToolOutput { text, is_error: false }
+    ToolOutput {
+        text,
+        is_error: false,
+    }
 }
 fn err(msg: &str) -> ToolOutput {
-    ToolOutput { text: msg.to_string(), is_error: true }
+    ToolOutput {
+        text: msg.to_string(),
+        is_error: true,
+    }
 }
-
