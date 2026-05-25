@@ -12,7 +12,12 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────
-  # Job 1: fast lint + unit-test pass (no PG needed)
+  # Lint + full test suite (lib + pg_test). The 11
+  # `#[pg_test]` items need a live PG cluster, so we use
+  # `cargo pgrx test pg18` (which boots its own user-
+  # owned cluster) instead of `cargo test --lib` (which
+  # would try to write into /usr/share/postgresql and
+  # fail with EACCES).
   # ─────────────────────────────────────────────────────
   lint-and-test:
     name: Lint + Unit tests (pg18, Linux x86_64)
@@ -21,29 +26,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ── Rust toolchain ──────────────────────────────
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      # ── Cargo cache ─────────────────────────────────
       - name: Cache Cargo registry + build artefacts
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.pgrx
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          # pgrx version is part of the key so a bump invalidates the
+          # pgrx data dir (which is tied to a specific PG layout).
+          key: ${{ runner.os }}-cargo-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ env.PGRX_VERSION }}-
 
-      # ── System deps ─────────────────────────────────
-      #    cargo pgrx needs clang for bindgen and PG18
-      #    server headers for the generated FFI types.
-      #    PG18 is not in Ubuntu 24.04 universe; we pull
-      #    it from the official PGDG apt repo.
-      - name: Add PGDG apt repository (PostgreSQL 18)
+      # PG18 server headers + pg_config for pgrx FFI generation. We
+      # do NOT install postgresql-18 itself — pgrx provides its own
+      # user-owned cluster under ~/.pgrx so `cargo pgrx test` has
+      # somewhere to write the extension files.
+      - name: Add PGDG apt repository
         run: |
           sudo apt-get install -y curl gnupg
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
@@ -53,13 +58,12 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
 
-      - name: Install PG18 + build deps
+      - name: Install PG18 dev headers + build deps
         run: |
           sudo apt-get install -y \
-            postgresql-18 postgresql-server-dev-18 \
-            libssl-dev libclang-dev clang pkg-config
+            postgresql-server-dev-18 \
+            libclang-dev clang pkg-config
 
-      # ── cargo-pgrx ──────────────────────────────────
       - name: Cache cargo-pgrx binary
         id: cache-pgrx-bin
         uses: actions/cache@v4
@@ -71,11 +75,14 @@ jobs:
         if: steps.cache-pgrx-bin.outputs.cache-hit != 'true'
         run: cargo install cargo-pgrx --locked --version ${{ env.PGRX_VERSION }}
 
-      # Point pgrx at the system PG18 (skips the multi-GB download).
-      - name: Initialise pgrx against system PG18
-        run: cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
+      # Use the SYSTEM pg_config (from postgresql-server-dev-18) for
+      # header layout, but tell pgrx to create its OWN cluster under
+      # ~/.pgrx — this is what makes `cargo pgrx test` work without
+      # root. Without this pgrx-test would try to install the
+      # extension into /usr/share/postgresql and fail with EACCES.
+      - name: Initialise pgrx (own cluster under ~/.pgrx)
+        run: cargo pgrx init --pg18 download
 
-      # ── Checks ──────────────────────────────────────
       - name: rustfmt check
         run: cargo fmt --all -- --check
 
@@ -85,73 +92,10 @@ jobs:
             --no-default-features --features pg18 \
             -- -D warnings
 
-      - name: Unit tests (no PG connection needed)
+      # `cargo pgrx test` boots its private pg18 cluster, installs the
+      # extension into it, and runs every `#[pg_test]` plus every
+      # `#[test]` together. Same 75/75 set we see locally.
+      - name: Run full test suite (cargo pgrx test pg18)
         run: |
-          cargo test \
-            --no-default-features --features pg18 \
-            --lib -- --nocapture
-
-  # ─────────────────────────────────────────────────────
-  # Job 2: sql_guard + planner + tools unit tests
-  #         (identical set, separate job for clear GH UI)
-  # ─────────────────────────────────────────────────────
-  test-modules:
-    name: Module unit tests (sql_guard / tools / telemetry)
-    runs-on: ubuntu-24.04
-    # re-uses the same steps — kept separate so failures
-    # surface per-module in the PR checks UI.
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Add PGDG + install PG18 dev
-        run: |
-          sudo apt-get install -y curl gnupg
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | sudo gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] \
-            https://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          sudo apt-get install -y \
-            postgresql-18 postgresql-server-dev-18 \
-            libssl-dev libclang-dev clang pkg-config
-
-      - name: Cache cargo-pgrx binary
-        id: cache-pgrx-bin
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-pgrx
-          key: ${{ runner.os }}-cargo-pgrx-${{ env.PGRX_VERSION }}
-
-      - name: Install cargo-pgrx
-        if: steps.cache-pgrx-bin.outputs.cache-hit != 'true'
-        run: cargo install cargo-pgrx --locked --version ${{ env.PGRX_VERSION }}
-
-      - name: Initialise pgrx against system PG18
-        run: |
-          cargo pgrx init --pg18 /usr/lib/postgresql/18/bin/pg_config
-
-      - name: Run sql_guard tests
-        run: |
-          cargo test \
-            --no-default-features --features pg18 \
-            --lib sql_guard -- --nocapture
-
-      - name: Run telemetry tests (truncation + UTF-8 regression)
-        run: |
-          cargo test \
-            --no-default-features --features pg18 \
-            --lib telemetry -- --nocapture
+          cargo pgrx test pg18 \
+            --no-default-features --features pg18

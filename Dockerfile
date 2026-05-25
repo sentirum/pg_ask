@@ -30,15 +30,21 @@ ARG PG_MAJOR
 ARG PGRX_VERSION
 
 # System build dependencies.
+#   ca-certificates:      curl/rustup TLS root trust (missing from
+#                         the slim postgres:18 base; without this
+#                         the rustup-init download fails with
+#                         "curl: (77) error setting certificate file").
 #   libclang-dev / clang: bindgen (pgrx uses it to parse PG headers)
-#   libssl-dev:           ureq TLS (native-tls backend)
-#   pkg-config:           locates openssl for ureq
+#   pkg-config:           still needed by some transitive build scripts
 #   postgresql-server-dev-${PG_MAJOR}: PG header files + pg_config
+#
+# v0.5.3 dropped libssl-dev: ureq 3 uses rustls now, so we no longer
+# need the OpenSSL headers in the builder image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
         build-essential \
         curl \
         pkg-config \
-        libssl-dev \
         libclang-dev \
         clang \
         postgresql-server-dev-${PG_MAJOR} \
