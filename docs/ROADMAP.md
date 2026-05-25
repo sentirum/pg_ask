@@ -31,8 +31,15 @@ The first cut that a careful operator could put in front of a real DB.
 - [x] `From<SpiError>` for `AskError`; drop hand-rolled `e.to_string()` glue
 - [x] README install note: macOS PG18 needs `brew install icu4c` before `cargo pgrx init`
 - [x] `docs/ARCHITECTURE.md`, `docs/SECURITY.md`
-- [ ] Local `cargo pgrx run pg18` end-to-end with a recorded provider fixture
-- [ ] sql_guard unit tests passing under `#[pg_test]` (today they pass under `cargo test`)
+- [x] Local `cargo pgrx run pg18` end-to-end with a recorded provider fixture
+      (v0.5.1: `providers::fixture` + `tests/fixtures/*.json`. Drives the
+      full agent loop — sql_guard, SPI, tool dispatch, telemetry —
+      under `cargo pgrx test` without any network access.)
+- [x] sql_guard tests passing under `#[pg_test]` (v0.5.1: the original
+      pure-Rust unit tests stayed in place for fast iteration; new
+      `pg_sql_guard_blocks_ddl_through_spi` and
+      `pg_sql_guard_blocks_multi_statement_through_spi` cover the SPI
+      call site against a real backend.)
 
 ## v0.2 — Multi-provider, sessions, preview, audit
 
@@ -150,7 +157,12 @@ In-progress milestone. Order of attack:
 - [x] Upgrade-script policy documented; `sql/pg_ask--0.4--0.5.sql` ships.
       New `_sql_audit` table, `_tools.updated_at` backfill, grant re-apply.
 
-## v0.5.1 — Schema rename (`pg_ask` → `ask`)
+## v0.5.1 — Schema rename, test framework, fixture provider, bug sweep
+
+A cleanup release: tightens the public surface, brings the full pgrx
+test framework online, and fixes three real bugs that the new tests
+uncovered. No new features for end users beyond `provider = 'fixture'`,
+which is a tooling primitive.
 
 - [x] Install schema renamed from `pg_ask` to `ask`. Functions and
       tables are now addressed as `ask.ask(…)`, `ask._traces`, etc.
@@ -159,6 +171,37 @@ In-progress milestone. Order of attack:
 - [x] In-place upgrade via `sql/pg_ask--0.5--0.5.1.sql`
       (`ALTER SCHEMA pg_ask RENAME TO ask`). Refuses to run if a schema
       called `ask` already exists.
+- [x] `cargo pgrx test` framework wired up. Required four cascading
+      fixes: macOS-arm64 linker flag in `.cargo/config.toml`
+      (`-Wl,-undefined,dynamic_lookup`), removal of
+      `schema = 'ask'` from pg_ask.control (collided with
+      `#[pg_schema] mod ask`-emitted `CREATE SCHEMA`), explicit
+      `CREATE SCHEMA IF NOT EXISTS ask` at the head of bootstrap.sql,
+      and two more `pg_ask.*` references in bootstrap that the rename
+      pass had missed (`SCHEMA pg_ask` in a REVOKE and
+      `'pg_ask'::regnamespace` in a DO block).
+- [x] Background worker (`mod bgworker`) re-enabled now that the
+      test framework can verify it loads (v0.5 stub heartbeat only).
+- [x] Fixture provider (`providers::fixture`) for tests and CI.
+      `provider = 'fixture'`, `model = 'fixture:<scenario>'`, JSON
+      script on disk replays one turn per `complete()` call.
+      `api_key` becomes optional iff `provider = 'fixture'`.
+
+### Bugs fixed in passing
+
+- [x] `tools::sql_query` and `tools::sample_table` were writing their
+      `_sql_audit` row *after* flipping `transaction_read_only = on`,
+      so under the default `pg_ask.readonly = on` every single tool
+      call self-deadlocked on its own audit insert and poisoned the
+      outer transaction. Audit is now written *before* the readonly
+      GUC, with `row_count = -1` to mean "in flight".
+- [x] `ask.preview` was unconditionally broken: EXPLAIN (FORMAT JSON)
+      returns a `json` Datum, but planner::explain was asking SPI for
+      `String`. The `.ok().flatten()` masked the type error as a
+      generic "no payload" message. Fixed by reading the column as
+      `pgrx::Json` directly.
+- [x] Three `error!()` strings and one bootstrap REVOKE that the
+      schema rename had missed.
 
 ## Non-goals (for now)
 
