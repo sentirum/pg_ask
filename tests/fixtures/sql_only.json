@@ -1,0 +1,5 @@
+[
+  {
+    "final": "SELECT count(*) FROM pg_class"
+  }
+]

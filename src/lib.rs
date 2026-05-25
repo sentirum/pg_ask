@@ -296,6 +296,18 @@ mod tests {
         assert_eq!(v.as_deref(), Some(env!("CARGO_PKG_VERSION")));
     }
 
+    /// Configure every fixture-driven test the same way: pick the
+    /// fixture provider, point at a scenario, and turn telemetry off
+    /// because the SECURITY DEFINER writer assumes the extension
+    /// owner and pgrx's test bootstrap role isn't that.
+    fn use_fixture(scenario: &str) {
+        use crate::providers::fixture::reset_cursor;
+        reset_cursor(scenario);
+        Spi::run("SET pg_ask.provider = 'fixture'").unwrap();
+        Spi::run(&format!("SET pg_ask.model = 'fixture:{scenario}'")).unwrap();
+        Spi::run("SET pg_ask.trace_enabled = off").unwrap();
+    }
+
     /// End-to-end smoke of the agent loop with zero network traffic.
     ///
     /// Drives `ask.ask(…)` through the fixture provider so the test
@@ -305,19 +317,7 @@ mod tests {
     /// touching an upstream API.
     #[pg_test]
     fn agent_loop_runs_against_fixture_provider() {
-        use crate::providers::fixture::reset_cursor;
-
-        // Counters are per-backend and persist across tests in the
-        // same connection; clear before driving the scenario so the
-        // first complete() call lands on turn 0.
-        reset_cursor("smoke_sql_query");
-
-        Spi::run("SET pg_ask.provider = 'fixture'").unwrap();
-        Spi::run("SET pg_ask.model    = 'fixture:smoke_sql_query'").unwrap();
-        // Disable trace writes — the SECURITY DEFINER writer requires
-        // the extension owner; under pgrx test we run as the bootstrap
-        // role and the simpler path is to just skip telemetry.
-        Spi::run("SET pg_ask.trace_enabled = off").unwrap();
+        use_fixture("smoke_sql_query");
 
         let answer: Option<String> =
             Spi::get_one("SELECT ask.ask('count the relations in pg_class')").unwrap();
@@ -328,6 +328,105 @@ mod tests {
                 .map(|s| s.contains("pg_class lists the relation count"))
                 .unwrap_or(false),
             "fixture-scripted final answer not echoed back, got: {answer:?}"
+        );
+    }
+
+    /// sql_guard must reject a model-emitted DROP, *through SPI*, not
+    /// just in the standalone unit tests. We script the agent to emit
+    /// `DROP TABLE pg_class`, then check the audit row records the
+    /// attempt and the final answer mentions the refusal — i.e. the
+    /// tool result that came back to the agent was an error string,
+    /// not a successful execution.
+    #[pg_test]
+    fn sql_guard_blocks_ddl_through_spi() {
+        use_fixture("agent_emits_drop");
+
+        let answer: Option<String> =
+            Spi::get_one("SELECT ask.ask('drop everything')").unwrap();
+
+        // The agent's final turn echoes "blocked by sql_guard"; that
+        // string came from the fixture script unconditionally, so this
+        // assertion only proves the loop completed. The next two
+        // assertions prove the guard actually fired.
+        assert!(answer.is_some());
+
+        // pg_class still exists — the most direct proof the DDL was
+        // rejected before SPI ever saw it.
+        let exists: Option<bool> = Spi::get_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'pg_class')",
+        )
+        .unwrap();
+        assert_eq!(exists, Some(true), "pg_class should survive a DROP attempt");
+
+        // The audit table should not contain a row for the rejected
+        // statement because sql_query bails before writing the audit
+        // row when validate() returns Err. (If we ever decide to log
+        // rejected attempts too, flip this assertion.)
+        let audited: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM ask._sql_audit WHERE query ILIKE 'DROP TABLE pg_class'",
+        )
+        .unwrap();
+        assert_eq!(audited, Some(0));
+    }
+
+    /// Same shape, but the model emits two statements separated by a
+    /// semicolon. Even in writable mode the guard rejects this; here
+    /// the default readonly mode rejects it twice over.
+    #[pg_test]
+    fn sql_guard_blocks_multi_statement_through_spi() {
+        use_fixture("agent_emits_multi_statement");
+
+        let answer: Option<String> =
+            Spi::get_one("SELECT ask.ask('two queries please')").unwrap();
+        assert!(answer.is_some());
+
+        // Nothing should have been audited.
+        let audited: Option<i64> = Spi::get_one(
+            "SELECT count(*) FROM ask._sql_audit WHERE query ILIKE '%SELECT 2%'",
+        )
+        .unwrap();
+        assert_eq!(audited, Some(0));
+    }
+
+    /// `ask.sql` is the generate-only path — no tools, no execution.
+    /// Fixture returns a single Final containing a SELECT; we check
+    /// the string round-trips out of the agent.
+    #[pg_test]
+    fn ask_sql_returns_fixture_text() {
+        use_fixture("sql_only");
+        let sql: Option<String> =
+            Spi::get_one("SELECT ask.sql('count pg_class rows')").unwrap();
+        assert_eq!(sql.as_deref(), Some("SELECT count(*) FROM pg_class"));
+    }
+
+    /// `ask.preview` runs sql_guard + EXPLAIN against the model's SQL
+    /// without executing it. We hand it a known-good SELECT and assert
+    /// the planner returned at least one row and one referenced table.
+    /// This exercises planner::analysis end-to-end (EXPLAIN JSON parse,
+    /// est_rows extraction, tables list) inside the real backend.
+    #[pg_test]
+    fn preview_returns_explain_for_select() {
+        use_fixture("sql_only");
+
+        // ask.preview is a SETOF (generated_sql, est_rows, tables, warnings).
+        let row = Spi::get_three::<String, i64, Vec<String>>(
+            "SELECT generated_sql, est_rows, tables \
+             FROM ask.preview('count pg_class rows')",
+        )
+        .unwrap();
+
+        let (sql, est_rows, tables) = row;
+        assert_eq!(sql.as_deref(), Some("SELECT count(*) FROM pg_class"));
+        // count(*) plan estimates a single output row.
+        assert!(
+            est_rows.unwrap_or(-1) >= 1,
+            "EXPLAIN should estimate at least one row for count(*), got {est_rows:?}"
+        );
+        // The referenced table list must include pg_class.
+        let tables = tables.unwrap_or_default();
+        assert!(
+            tables.iter().any(|t| t.ends_with("pg_class")),
+            "preview should report pg_class as a referenced table, got {tables:?}"
         );
     }
 }

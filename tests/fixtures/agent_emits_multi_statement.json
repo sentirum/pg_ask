@@ -1,0 +1,17 @@
+[
+  {
+    "text": "",
+    "tool_calls": [
+      {
+        "id": "call_multi",
+        "name": "sql_query",
+        "arguments": {
+          "query": "SELECT 1; SELECT 2"
+        }
+      }
+    ]
+  },
+  {
+    "final": "Tool refused multi-statement input."
+  }
+]

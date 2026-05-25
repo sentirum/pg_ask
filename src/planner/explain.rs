@@ -32,17 +32,21 @@ pub fn run(sql: &str) -> Result<Value> {
             .next()
             .ok_or_else(|| AskError::Sql("EXPLAIN returned no rows".into()))?;
 
-        // The cell value is JSON serialised as text — both `json` and `jsonb`
-        // output paths come back as String through SPI when we ask for it
-        // that way. Keep it simple.
-        let text: String = row
-            .get_datum_by_ordinal(1)
-            .ok()
-            .and_then(|d| d.value::<String>().ok().flatten())
+        // EXPLAIN (FORMAT JSON) returns one row whose only column is
+        // typed as Postgres `json` (oid 114), NOT `text`. pgrx is
+        // strict about Datum type compatibility, so asking for
+        // `String` here errors with "Postgres type json is not
+        // compatible with the Rust type alloc::string::String". The
+        // matching adapter exported from the prelude is `pgrx::Json`,
+        // a newtype around `serde_json::Value` whose FromDatum impl
+        // accepts the `json` Datum and deserialises it for us — which
+        // saves the round-trip through a text representation we'd
+        // otherwise have to re-parse with serde_json by hand.
+        let parsed: Value = row
+            .get::<pgrx::Json>(1)
+            .map_err(|e| AskError::Sql(format!("EXPLAIN read failed: {e}")))?
+            .map(|j| j.0)
             .ok_or_else(|| AskError::Sql("EXPLAIN row had no payload".into()))?;
-
-        let parsed: Value = serde_json::from_str(&text)
-            .map_err(|e| AskError::Sql(format!("EXPLAIN JSON parse failed: {e}")))?;
 
         // Postgres returns an array with one element per statement.
         let first = parsed

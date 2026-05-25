@@ -1,0 +1,17 @@
+[
+  {
+    "text": "I'll run the query.",
+    "tool_calls": [
+      {
+        "id": "call_drop",
+        "name": "sql_query",
+        "arguments": {
+          "query": "DROP TABLE pg_class"
+        }
+      }
+    ]
+  },
+  {
+    "final": "The query was blocked by sql_guard; I tried DROP TABLE but the database refused it."
+  }
+]
