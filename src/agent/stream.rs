@@ -99,7 +99,22 @@ pub fn run_stream_with_cfg(
 
                 for call in calls {
                     let output = dispatch::dispatch(&tools_vec, &call.name, &call.arguments);
-                    out.push(format!("[tool] {} → {}", call.name, output.text));
+                    // v0.5.2 review #11: cap the streamed line. A
+                    // 500-row sql_query result can be hundreds of KB,
+                    // and the previous `[tool] {} → {}` line
+                    // dumped the entire thing into ONE element of
+                    // the SetOfIterator, which (a) blows past the
+                    // libpq reply buffer for `ask.ask_stream`
+                    // consumers and (b) is unreadable anyway.
+                    // Truncated copy goes to the streaming surface;
+                    // the model still sees the full text via
+                    // `history` so its next reasoning step has
+                    // complete information.
+                    out.push(format!(
+                        "[tool] {} → {}",
+                        call.name,
+                        crate::telemetry::truncate_tool_output(&output.text)
+                    ));
                     history.push(Message {
                         role: Role::Tool,
                         content: MessageContent::ToolResult {

@@ -48,17 +48,34 @@ pub struct ToolCallTrace {
     pub elapsed_ms: u64,
 }
 
+/// Cap on the number of characters of tool output we ever propagate
+/// out of the agent loop, either into the persisted trace row or
+/// into the streaming surface (`ask.ask_stream`). Sized so a
+/// 100-row `sql_query` table fits without truncation while a
+/// pathological 500k-row dump cannot blow up a backend's reply
+/// buffer. Shared between [`ToolCallTrace::from_call`] and
+/// [`truncate_tool_output`] so both surfaces are bounded the same
+/// way — see v0.5.2 review item #11.
+pub const TOOL_OUTPUT_PREVIEW_CHARS: usize = 2_000;
+
+/// Truncate `output` to [`TOOL_OUTPUT_PREVIEW_CHARS`] characters,
+/// appending an ellipsis when a cut happens. Char-boundary safe
+/// (we iterate over `chars()`, not bytes, so the cut never lands
+/// in the middle of a UTF-8 code point).
+pub fn truncate_tool_output(output: &str) -> String {
+    if output.chars().count() > TOOL_OUTPUT_PREVIEW_CHARS {
+        let cut: String = output.chars().take(TOOL_OUTPUT_PREVIEW_CHARS).collect();
+        format!("{cut}…")
+    } else {
+        output.to_string()
+    }
+}
+
 impl ToolCallTrace {
     /// Build from a model-issued tool call + the resulting output. Truncates
     /// the output so a runaway query doesn't bloat the audit row.
     pub fn from_call(call: &ToolCall, output: &str, is_error: bool, elapsed_ms: u64) -> Self {
-        const PREVIEW_CHARS: usize = 2_000;
-        let preview = if output.chars().count() > PREVIEW_CHARS {
-            let cut: String = output.chars().take(PREVIEW_CHARS).collect();
-            format!("{cut}…")
-        } else {
-            output.to_string()
-        };
+        let preview = truncate_tool_output(output);
         Self {
             name: call.name.clone(),
             arguments: call.arguments.clone(),
@@ -150,5 +167,46 @@ pub fn write(rec: &TraceRecord) {
     );
     if let Err(e) = result {
         pgrx::warning!("pg_ask telemetry: failed to insert trace row: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{truncate_tool_output, TOOL_OUTPUT_PREVIEW_CHARS};
+
+    /// Short input passes through unchanged — no ellipsis, no
+    /// allocation overhead beyond a single `to_string`. Catches
+    /// off-by-one regressions on the boundary check.
+    #[test]
+    fn short_output_unchanged() {
+        let s = "hello world";
+        assert_eq!(truncate_tool_output(s), s);
+    }
+
+    /// Long input is cut exactly at the boundary and the ellipsis
+    /// is appended. Char-count (not byte-count) is the unit so
+    /// multibyte input doesn't double-trim. The streaming surface
+    /// relies on this bound; see agent/stream.rs.
+    #[test]
+    fn long_output_truncated_with_ellipsis() {
+        let s: String = "x".repeat(TOOL_OUTPUT_PREVIEW_CHARS + 500);
+        let out = truncate_tool_output(&s);
+        assert_eq!(out.chars().count(), TOOL_OUTPUT_PREVIEW_CHARS + 1);
+        assert!(out.ends_with('…'));
+    }
+
+    /// UTF-8 safety: a string padded to over the cap with a
+    /// multibyte glyph at the cut boundary must not panic and must
+    /// not return invalid UTF-8. Reproduces the byte-vs-char
+    /// confusion that would crop up if the helper switched to
+    /// `&s[..N]` slicing.
+    #[test]
+    fn truncation_respects_char_boundaries() {
+        let s: String = "ç".repeat(TOOL_OUTPUT_PREVIEW_CHARS + 10);
+        let out = truncate_tool_output(&s);
+        // The cut must happen between `ç` chars, never inside one.
+        assert!(out.starts_with('ç'));
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), TOOL_OUTPUT_PREVIEW_CHARS + 1);
     }
 }
