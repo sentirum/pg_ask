@@ -1,23 +1,55 @@
 //! User-defined tools — SQL snippets registered by operators via
 //! `ask.register_tool(name, spec, body)`.
 //!
-//! At invocation time the tool's jsonb arguments are interpolated into
-//! `{{key}}` placeholders in the body string. The resulting SQL is executed
-//! via SPI and the result set is rendered as a text table (same layout as
-//! `sql_query`).
+//! ## Argument interpolation (C4 in the v0.5.2 review)
 //!
-//! Security model: only the owner (or a superuser) can delete a registered
-//! tool. The body itself is raw SQL — it is the operator's responsibility
-//! to validate it before registering. There is no sql_guard on user-defined
-//! tools because the operator explicitly opted in to the snippet.
+//! At invocation time the tool's jsonb arguments are substituted into
+//! `{{key}}` placeholders in the body string. Before v0.5.2 we did this
+//! by raw string substitution (`out.replace("{{x}}", arg_value)`),
+//! which meant a model-supplied argument like `0; DROP TABLE _config; --`
+//! ended up concatenated straight into the SQL. The operator's tool
+//! body was trusted but the model's arguments were not — and we trusted
+//! both.
+//!
+//! The fix: scan the body for `{{key}}` markers, replace each with a
+//! numbered placeholder (`$2, $3, …` — `$1` is reserved for the row
+//! cap), and pass the corresponding jsonb value as a bind parameter to
+//! the SQL engine. The body author keeps the same `{{key}}` syntax;
+//! the value never participates in SQL parsing.
+//!
+//! ## Type mapping
+//!
+//! JSON → Postgres:
+//!  * `string`  → `text`
+//!  * `integer` → `int8` (JSON has no int/float distinction, but
+//!                serde_json keeps the original lexeme; we route
+//!                values without a fractional part to int8 so they
+//!                cast cleanly to numeric column targets)
+//!  * `number`  → `float8`
+//!  * `bool`    → `bool`
+//!  * `null`    → typed NULL (we emit `NULL::text` so the type is
+//!                inferable in plain interpolation contexts)
+//!  * `array` / `object` → `jsonb`
+//!
+//! ## Operator responsibility
+//!
+//! There is no sql_guard on user-defined tool bodies because the operator
+//! explicitly opted in. The body should still be written defensively (e.g.
+//! `WHERE col = {{key}}` rather than `WHERE col IN ({{key}})` if the model
+//! might pass a list and you weren't expecting jsonb).
 
+use super::render;
 use super::{Tool, ToolOutput};
 use crate::infra::errors::{AskError, Result};
 use crate::providers::ToolSpec;
 use pgrx::prelude::*;
 use serde_json::Value;
 
-const MAX_CELL_CHARS: usize = 500;
+/// Default cap on rows returned to the model from a user-defined tool.
+/// Operators can't override this per-tool yet (planned: H6 in the
+/// review). Match `sql_query`'s default so the model sees the same
+/// budget regardless of which path it went through.
+const USER_TOOL_ROW_CAP: usize = 100;
 
 pub struct UserDefinedTool {
     pub name: String,
@@ -31,12 +63,12 @@ impl Tool for UserDefinedTool {
     }
 
     fn invoke(&self, args: &Value) -> Result<ToolOutput> {
-        let sql = interpolate(&self.body, args).map_err(|e| AskError::Tool {
+        let plan = build_plan(&self.body, args).map_err(|e| AskError::Tool {
             name: self.name.clone(),
             message: e,
         })?;
 
-        match run_sql(&sql) {
+        match run_planned(&plan) {
             Ok(text) => Ok(ToolOutput {
                 text,
                 is_error: false,
@@ -49,109 +81,309 @@ impl Tool for UserDefinedTool {
     }
 }
 
-/// Replace `{{key}}` placeholders in `template` with the corresponding
-/// jsonb values. Nested values are rendered as compact JSON strings.
-fn interpolate(template: &str, args: &Value) -> std::result::Result<String, String> {
-    let mut out = template.to_string();
-    if let Value::Object(map) = args {
-        for (key, val) in map {
-            let placeholder = format!("{{{{{}}}}}" , key);
-            let replacement = match val {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                Value::Bool(b) => b.to_string(),
-                Value::Null => "NULL".to_string(),
-                other => other.to_string(),
-            };
-            out = out.replace(&placeholder, &replacement);
-        }
-    }
-    // Defensive: if any `{{...}}` remains, warn the model.
-    if out.contains("{{") {
-        return Err(format!(
-            "interpolation incomplete: body still contains `{{...}}` placeholders. \
-             Available arguments: {}",
-            args.to_string()
-        ));
-    }
-    Ok(out)
+/// One bound argument resolved from the tool's input jsonb.
+///
+/// We keep the JSON `Value` rather than pre-converting to a pgrx Datum:
+/// the conversion happens later under the `Spi::connect` callback so
+/// every datum we hand SPI is freshly built in the right memory context.
+#[derive(Debug, PartialEq)]
+enum Bound {
+    Text(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Null,
+    /// Composite values (arrays / objects) are serialised as JSON text and
+    /// passed in with an explicit `::jsonb` cast in the rewritten body so
+    /// the planner doesn't have to guess the type.
+    Jsonb(String),
 }
 
-fn run_sql(query: &str) -> std::result::Result<String, String> {
-    Spi::connect(|client| -> std::result::Result<String, String> {
-        let tuptable = client.select(query, None, &[]).map_err(|e| e.to_string())?;
-        let columns = tuptable.columns().map_err(|e| e.to_string())?;
-        let col_names: Vec<String> = (1..=columns)
-            .map(|i| {
-                tuptable
-                    .column_name(i)
-                    .unwrap_or_else(|_| format!("col{i}"))
-            })
-            .collect();
+#[derive(Debug, PartialEq)]
+struct Plan {
+    /// Body with each `{{key}}` replaced by `$N` (or `($N::jsonb)` for
+    /// composite values). Placeholders start at `$2` because `$1` is the
+    /// row cap added by `render::wrap_with_cap`.
+    rewritten_body: String,
+    /// Bind values in `$2..` order.
+    bindings: Vec<Bound>,
+}
 
-        let mut rows: Vec<Vec<String>> = Vec::new();
-        for row in tuptable.into_iter() {
-            let mut cells: Vec<String> = Vec::with_capacity(col_names.len());
-            for c in 1..=col_names.len() {
-                let val: Option<String> = row
-                    .get_datum_by_ordinal(c)
-                    .ok()
-                    .and_then(|d| d.value::<String>().ok().flatten());
-                cells.push(truncate_cell(&val.unwrap_or_else(|| "NULL".to_string())));
+/// Walk `template` for `{{key}}` markers, look each one up in `args`,
+/// and assemble a `Plan` of the rewritten SQL + bind values.
+///
+/// Same `{{key}}` repeated in the body reuses the same `$N` placeholder
+/// (and binds the value once), which is both faster and matches what
+/// hand-written parameterised SQL would do.
+fn build_plan(template: &str, args: &Value) -> std::result::Result<Plan, String> {
+    let obj = match args {
+        Value::Object(map) => map,
+        // Empty / non-object args: still scan for unresolved placeholders
+        // so we surface the "missing argument" error instead of silently
+        // running with a literal `{{key}}` in the SQL.
+        _ => {
+            if template.contains("{{") {
+                return Err("user-defined tool called with non-object arguments".into());
             }
-            rows.push(cells);
+            return Ok(Plan {
+                rewritten_body: template.to_string(),
+                bindings: Vec::new(),
+            });
         }
-        Ok(render_table(&col_names, &rows))
+    };
+
+    // First pass: find every unique placeholder name in the order it
+    // first appears. Order matters because the user's body might mix
+    // `{{a}}` and `{{b}}` arbitrarily and we want $2..$N to be stable.
+    let mut placeholder_order: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(open) = template[cursor..].find("{{") {
+        let abs_open = cursor + open;
+        let after_open = abs_open + 2;
+        let close = template[after_open..]
+            .find("}}")
+            .ok_or_else(|| "unterminated `{{` placeholder in tool body".to_string())?;
+        let key = template[after_open..after_open + close].trim().to_string();
+        if key.is_empty() {
+            return Err("empty `{{}}` placeholder in tool body".into());
+        }
+        if !placeholder_order.contains(&key) {
+            placeholder_order.push(key);
+        }
+        cursor = after_open + close + 2;
+    }
+
+    // Bind values, in $2..$N order.
+    let mut bindings: Vec<Bound> = Vec::with_capacity(placeholder_order.len());
+    for key in &placeholder_order {
+        let val = obj
+            .get(key)
+            .ok_or_else(|| format!("missing argument `{key}` for tool"))?;
+        bindings.push(json_to_bound(val));
+    }
+
+    // Second pass: rewrite the template with placeholders. We do this in
+    // one linear scan rather than `String::replace` so two unrelated
+    // placeholders with overlapping substrings (`{{a}}` vs `{{ab}}`)
+    // can't interfere.
+    let mut rewritten = String::with_capacity(template.len());
+    let mut cursor = 0usize;
+    while let Some(open) = template[cursor..].find("{{") {
+        let abs_open = cursor + open;
+        rewritten.push_str(&template[cursor..abs_open]);
+        let after_open = abs_open + 2;
+        let close = template[after_open..]
+            .find("}}")
+            .expect("validated in first pass");
+        let key = template[after_open..after_open + close].trim();
+        let idx = placeholder_order
+            .iter()
+            .position(|k| k == key)
+            .expect("inserted in first pass");
+        // $2 onwards \u2014 $1 is reserved for the row cap.
+        let pg_idx = idx + 2;
+        let bind = &bindings[idx];
+        // jsonb composite values need an explicit cast so the planner
+        // can resolve operator overloading; scalars infer fine.
+        match bind {
+            Bound::Jsonb(_) => rewritten.push_str(&format!("(${pg_idx}::jsonb)")),
+            _ => rewritten.push_str(&format!("${pg_idx}")),
+        }
+        cursor = after_open + close + 2;
+    }
+    rewritten.push_str(&template[cursor..]);
+
+    Ok(Plan {
+        rewritten_body: rewritten,
+        bindings,
     })
 }
 
-fn truncate_cell(s: &str) -> String {
-    if s.chars().count() > MAX_CELL_CHARS {
-        let cut: String = s.chars().take(MAX_CELL_CHARS).collect();
-        format!("{cut}…")
-    } else {
-        s.to_string()
+fn json_to_bound(v: &Value) -> Bound {
+    match v {
+        Value::Null => Bound::Null,
+        Value::Bool(b) => Bound::Bool(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Bound::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                Bound::Float(f)
+            } else {
+                // serde_json arbitrary-precision path \u2014 stringify
+                // so the user can cast it server-side.
+                Bound::Text(n.to_string())
+            }
+        }
+        Value::String(s) => Bound::Text(s.clone()),
+        Value::Array(_) | Value::Object(_) => Bound::Jsonb(v.to_string()),
     }
 }
 
-fn render_table(cols: &[String], rows: &[Vec<String>]) -> String {
-    if rows.is_empty() {
-        return format!("(0 rows)\ncolumns: {}", cols.join(", "));
-    }
-    let widths: Vec<usize> = cols
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let max_cell = rows
-                .iter()
-                .map(|r| r.get(i).map(|s| s.chars().count()).unwrap_or(0))
-                .max()
-                .unwrap_or(0);
-            name.chars().count().max(max_cell)
-        })
-        .collect();
+fn run_planned(plan: &Plan) -> std::result::Result<String, String> {
+    let wrapped = render::wrap_with_cap(&plan.rewritten_body);
+    let cap_plus_one = (USER_TOOL_ROW_CAP.saturating_add(1)) as i64;
 
-    let mut out = String::new();
-    fmt_row(&mut out, cols.iter().map(String::as_str), &widths);
-    fmt_sep(&mut out, &widths);
-    for row in rows {
-        fmt_row(&mut out, row.iter().map(String::as_str), &widths);
-    }
-    out.push_str(&format!("\n({} rows)", rows.len()));
-    out
+    Spi::connect(|client| -> std::result::Result<String, String> {
+        // We have to build the bind args under the connect callback so
+        // every Datum is allocated in the right memory context. The
+        // first arg ($1) is the row cap; everything after ($2..) is the
+        // model's bound input.
+        let mut args: Vec<pgrx::datum::DatumWithOid> = Vec::with_capacity(plan.bindings.len() + 1);
+        args.push(cap_plus_one.into());
+        for b in &plan.bindings {
+            args.push(match b {
+                Bound::Text(s) => s.as_str().into(),
+                Bound::Int(i) => (*i).into(),
+                Bound::Float(f) => (*f).into(),
+                Bound::Bool(b) => (*b).into(),
+                // NULL routing through pgrx: an Option::<&str>::None
+                // becomes a NULL text datum, which the planner can
+                // coerce to whatever the surrounding context expects.
+                Bound::Null => Option::<&str>::None.into(),
+                Bound::Jsonb(s) => s.as_str().into(),
+            });
+        }
+
+        let tuptable = client
+            .select(&wrapped, Some(cap_plus_one), &args)
+            .map_err(|e| e.to_string())?;
+
+        let (json_rows, truncated) =
+            render::parse_json_rows(tuptable, USER_TOOL_ROW_CAP)?;
+        // No sensitive-column filtering: user-defined tool bodies are
+        // operator-authored, so the operator already controls what
+        // columns leak. Per-tool sensitivity could be added later via
+        // the spec JSON.
+        let (text, _) = render::format_table(&json_rows, &[], truncated, USER_TOOL_ROW_CAP);
+        Ok(text)
+    })
 }
 
-fn fmt_row<'a, I: Iterator<Item = &'a str>>(out: &mut String, cells: I, widths: &[usize]) {
-    let parts: Vec<String> = cells
-        .zip(widths.iter())
-        .map(|(c, w)| format!("{:<width$}", c, width = w))
-        .collect();
-    out.push_str(&parts.join(" | "));
-    out.push('\n');
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
-fn fmt_sep(out: &mut String, widths: &[usize]) {
-    let parts: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
-    out.push_str(&parts.join("-+-"));
-    out.push('\n');
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn injection_via_string_arg_is_neutralised() {
+        // Pre-v0.5.2 this template would have produced:
+        //   SELECT * FROM users WHERE age >= 0; DROP TABLE _config; --
+        // i.e. two statements. Post-fix it produces a single parameterised
+        // statement; the entire malicious string is bound as one text
+        // value to $2 and never parsed as SQL.
+        let body = "SELECT * FROM users WHERE age >= {{min_age}}";
+        let args = json!({ "min_age": "0; DROP TABLE _config; --" });
+        let plan = build_plan(body, &args).unwrap();
+        assert_eq!(
+            plan.rewritten_body,
+            "SELECT * FROM users WHERE age >= $2"
+        );
+        assert_eq!(
+            plan.bindings,
+            vec![Bound::Text("0; DROP TABLE _config; --".into())]
+        );
+    }
+
+    #[test]
+    fn repeated_placeholder_reuses_same_param() {
+        let body = "SELECT {{n}} AS a, {{n}} + 1 AS b WHERE x > {{n}}";
+        let args = json!({ "n": 42 });
+        let plan = build_plan(body, &args).unwrap();
+        assert_eq!(plan.bindings, vec![Bound::Int(42)]);
+        assert_eq!(plan.rewritten_body, "SELECT $2 AS a, $2 + 1 AS b WHERE x > $2");
+    }
+
+    #[test]
+    fn multiple_placeholders_get_distinct_params() {
+        // Argument order in the args object must not affect param numbering;
+        // numbering follows first-appearance order in the body.
+        let body = "SELECT * WHERE a = {{first}} AND b = {{second}}";
+        let args = json!({ "second": "B", "first": "A" });
+        let plan = build_plan(body, &args).unwrap();
+        assert_eq!(plan.rewritten_body, "SELECT * WHERE a = $2 AND b = $3");
+        assert_eq!(
+            plan.bindings,
+            vec![Bound::Text("A".into()), Bound::Text("B".into())]
+        );
+    }
+
+    #[test]
+    fn json_value_types_map_to_expected_bound_variants() {
+        let body = "SELECT {{s}}, {{i}}, {{f}}, {{b}}, {{nil}}, {{arr}}, {{obj}}";
+        let args = json!({
+            "s":   "hello",
+            "i":   42,
+            "f":   3.14,
+            "b":   true,
+            "nil": null,
+            "arr": [1, 2, 3],
+            "obj": {"k": "v"},
+        });
+        let plan = build_plan(body, &args).unwrap();
+        // First appearance order: s, i, f, b, nil, arr, obj
+        let kinds: Vec<&str> = plan
+            .bindings
+            .iter()
+            .map(|b| match b {
+                Bound::Text(_) => "text",
+                Bound::Int(_) => "int",
+                Bound::Float(_) => "float",
+                Bound::Bool(_) => "bool",
+                Bound::Null => "null",
+                Bound::Jsonb(_) => "jsonb",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["text", "int", "float", "bool", "null", "jsonb", "jsonb"]
+        );
+        // Composite values get the explicit ::jsonb cast in the rewrite.
+        assert!(plan.rewritten_body.contains("($7::jsonb)"));
+        assert!(plan.rewritten_body.contains("($8::jsonb)"));
+    }
+
+    #[test]
+    fn missing_argument_is_reported_not_silently_left_in() {
+        let body = "SELECT {{missing}}";
+        let err = build_plan(body, &json!({})).unwrap_err();
+        assert!(err.contains("missing argument"), "got: {err}");
+    }
+
+    #[test]
+    fn unterminated_placeholder_is_an_error() {
+        let body = "SELECT {{never_closed";
+        let err = build_plan(body, &json!({})).unwrap_err();
+        assert!(err.contains("unterminated"), "got: {err}");
+    }
+
+    #[test]
+    fn whitespace_inside_placeholder_is_ignored() {
+        let body = "SELECT {{  spaced  }}";
+        let plan = build_plan(body, &json!({"spaced": 1})).unwrap();
+        assert_eq!(plan.rewritten_body, "SELECT $2");
+        assert_eq!(plan.bindings, vec![Bound::Int(1)]);
+    }
+
+    #[test]
+    fn overlapping_placeholder_names_dont_collide() {
+        // Regression-style: with naive `String::replace` substituting `{{a}}`
+        // first would also damage `{{ab}}`. Our single-pass walker is
+        // immune by construction; this test pins the behaviour.
+        let body = "{{a}} + {{ab}} + {{a}}";
+        let plan = build_plan(body, &json!({"a": 1, "ab": 2})).unwrap();
+        assert_eq!(plan.rewritten_body, "$2 + $3 + $2");
+        assert_eq!(plan.bindings, vec![Bound::Int(1), Bound::Int(2)]);
+    }
+
+    #[test]
+    fn no_placeholders_passes_through() {
+        let body = "SELECT 1";
+        let plan = build_plan(body, &json!({})).unwrap();
+        assert_eq!(plan.rewritten_body, "SELECT 1");
+        assert!(plan.bindings.is_empty());
+    }
 }

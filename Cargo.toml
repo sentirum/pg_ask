@@ -24,14 +24,26 @@ pg_test = []
 [dependencies]
 pgrx = "=0.18.0"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps JSON object key order during deserialization,
+# which we rely on in `tools::render::row_to_json` to preserve column
+# order when rendering query results to the model.
+serde_json = { version = "1", features = ["preserve_order"] }
 # Blocking HTTP — pgrx fonksiyonları sync; PG backend tek thread, async runtime istemiyoruz.
 ureq = { version = "2.10", features = ["json", "tls"] }
+# `url` powers host-based allow-list parsing in tools::http_fetch (C5
+# SSRF fix). We need real RFC 3986 parsing rather than `starts_with`
+# string matching, which previously let `api.openai.com.evil.com` slip
+# past a `https://api.openai.com` allow entry.
+url = "2"
 thiserror = "1"
 # Real SQL parser for sql_guard (v0.5). Replaces the token-based matcher
 # for statement-type classification while keeping the lexer for function
 # denylist checks.
-sqlparser = "0.62"
+# `visitor` feature unlocks the Visit / Visitor traits used by
+# sql_guard::secrets_visitor to walk the AST (C8 v0.5.2 review). Without
+# it the deny-list could only check statement type, not nested function
+# calls or relation references.
+sqlparser = { version = "0.62", features = ["visitor"] }
 
 [dev-dependencies]
 pgrx-tests = "=0.18.0"

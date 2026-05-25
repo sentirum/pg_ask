@@ -109,39 +109,53 @@ pub fn append(session_id: Uuid, messages: &[Message]) -> Result<()> {
     }
 
     Spi::connect_mut(|client| -> Result<()> {
-        // Find next idx in a single statement to avoid race-during-append.
-        // RETURNING gives us back the row we just wrote so we don't need
-        // a second SELECT.
-        let next_idx_query =
-            "SELECT COALESCE(MAX(idx), -1) + 1 FROM ask._messages WHERE session_id = $1";
-
-        let mut next: i32 = client
-            .select(next_idx_query, None, &[session_id.into()])?
-            .into_iter()
-            .next()
-            .and_then(|r| {
-                r.get_datum_by_ordinal(1)
-                    .ok()
-                    .and_then(|d| d.value::<i32>().ok().flatten())
-            })
-            .unwrap_or(0);
+        // C7 (v0.5.2 review): the previous implementation read
+        // `MAX(idx) + 1` into Rust and then issued the INSERT — two
+        // statements, so two concurrent `ask.chat()` calls against the
+        // same session would both compute the same next index and the
+        // second INSERT would fail on the (session_id, idx) primary
+        // key (or worse, succeed if the PK were ever relaxed).
+        //
+        // We now take a session-scoped transactional advisory lock
+        // *before* any read. The lock is keyed on the session UUID
+        // (hashed to a bigint with hashtextextended); it's released
+        // automatically at end of transaction. Cross-session appends
+        // don't contend because they hash to different keys (modulo
+        // birthday collisions, which only cost a brief wait — they
+        // can't corrupt data).
+        //
+        // We also derive the next idx atomically inside each INSERT
+        // using a CTE, so even if the lock were absent the write
+        // itself is consistent against the current state. The lock is
+        // belt-and-braces against the loop-of-inserts case where two
+        // sessions interleaving could otherwise produce gappy or
+        // duplicated indices.
+        client.update(
+            "SELECT pg_advisory_xact_lock(\n             hashtextextended('ask._messages:' || $1::text, 0)\n           )",
+            None,
+            &[session_id.into()],
+        )?;
 
         for msg in messages {
             let (role, content, tool_calls, tool_call_id, is_error) = encode(msg);
-
-            // Build the args slice. We always pass the same 7 positional
-            // parameters; null fields go in as Option<&str>::None / etc.
-            // pgrx's DatumWithOid blanket From<Option<T>> handles this.
             let tc_owned: Option<String> = tool_calls.map(|v| v.to_string());
 
+            // Single-statement append: derive next idx from the table
+            // itself in the same INSERT. This is consistent under our
+            // transaction snapshot (advisory lock above serialises
+            // writers for the same session, so MAX(idx) we observe is
+            // the actual highest committed/in-flight idx for this txn).
             client.update(
                 "INSERT INTO ask._messages
                     (session_id, idx, role, content, tool_calls, tool_call_id, is_error)
-                 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)",
+                 SELECT $1,
+                        COALESCE(MAX(idx), -1) + 1,
+                        $2, $3, $4::jsonb, $5, $6
+                   FROM ask._messages
+                  WHERE session_id = $1",
                 None,
                 &[
                     session_id.into(),
-                    next.into(),
                     role.into(),
                     content.into(),
                     tc_owned.as_deref().into(),
@@ -149,7 +163,6 @@ pub fn append(session_id: Uuid, messages: &[Message]) -> Result<()> {
                     is_error.into(),
                 ],
             )?;
-            next += 1;
         }
 
         // Touch updated_at so listings sort sensibly.

@@ -12,13 +12,13 @@
 //! Errors (table not found, no privilege) flow back as `is_error` so the
 //! model can self-correct.
 
+use super::render::{self, RenderedTable};
 use super::{Tool, ToolOutput};
 use crate::infra::errors::{AskError, Result};
 use crate::providers::ToolSpec;
 use pgrx::prelude::*;
 use serde_json::json;
 
-const MAX_CELL_CHARS: usize = 500;
 const DEFAULT_SAMPLE_ROWS: usize = 3;
 const MAX_SAMPLE_ROWS: usize = 10;
 
@@ -92,6 +92,7 @@ impl Tool for SampleTableTool {
             schema,
             table,
             self.readonly,
+            n,
             self.statement_timeout_ms,
             &self.sensitive_columns,
         ) {
@@ -112,20 +113,20 @@ fn run_sample(
     schema: &str,
     table: &str,
     readonly: bool,
+    max_rows: usize,
     statement_timeout_ms: u64,
     sensitive: &[String],
 ) -> std::result::Result<String, String> {
     let timeout_sql = format!("SET LOCAL statement_timeout = {statement_timeout_ms}");
     let readonly_sql = "SET LOCAL transaction_read_only = on";
 
-    Spi::connect_mut(|client| -> std::result::Result<String, String> {
-        // Audit FIRST, before transaction_read_only is flipped. See
-        // the matching comment in tools::sql_query::run_query_to_text
-        // for the rationale; same bug, same fix. row_count is -1 to
-        // signal "query is about to run".
+    Spi::connect_mut(|client| -> std::result::Result<(), String> {
+        // Audit FIRST, before transaction_read_only is flipped. Same
+        // pattern as sql_query::run_query_to_text — see the comment
+        // there. row_count = -1 means "in flight / unknown".
+        // Audit via SECURITY DEFINER helper (C3); see sql_query for context.
         let _ = client.update(
-            "INSERT INTO ask._sql_audit (query, row_count, readonly, tool_name) \
-             VALUES ($1, $2, $3, 'sample_table')",
+            "SELECT ask._sql_audit_insert($1, $2, $3, 'sample_table')",
             None,
             &[query.into(), (-1i32).into(), readonly.into()],
         );
@@ -138,114 +139,49 @@ fn run_sample(
                 .update(readonly_sql, None, &[])
                 .map_err(|e| e.to_string())?;
         }
+        Ok(())
+    })?;
 
-        // Privilege guard: invisible tables return 0 rows; we don't leak
-        // existence by distinguishing "no rows" from "no privilege".
-        let tuptable = client
-            .select(query, None, &[])
-            .map_err(|e| e.to_string())?;
+    // sample_table knows the schema/table the columns come from, so we
+    // expand each pattern to its bare-name / table.col / schema.table.col
+    // variants. The render helper does its own bare-name + dotted-suffix
+    // matching, so feeding it the FQN forms is what enables full
+    // qualification (e.g. `sensitive_columns = 'public.users.password'`).
+    let expanded = expand_patterns_for_table(schema, table, sensitive);
 
-        let columns = tuptable.columns().map_err(|e| e.to_string())?;
-        let col_names: Vec<String> = (1..=columns)
-            .map(|i| {
-                tuptable
-                    .column_name(i)
-                    .unwrap_or_else(|_| format!("col{i}"))
-            })
-            .collect();
+    // Privilege guard: invisible tables return 0 rows naturally; we
+    // don't leak existence by distinguishing "no rows" from "no privilege".
+    let RenderedTable { text, .. } = render::run_to_table(query, max_rows, &expanded)?;
+    Ok(text)
+}
 
-        // Build the fully-qualified column identifiers for redaction lookup.
-        let fqn_cols: Vec<String> = col_names
-            .iter()
-            .map(|c| format!("{schema}.{table}.{c}"))
-            .collect();
-
-        let mut rows: Vec<Vec<String>> = Vec::new();
-        for row in tuptable.into_iter() {
-            let mut cells: Vec<String> = Vec::with_capacity(col_names.len());
-            for c in 1..=col_names.len() {
-                let val: Option<String> = row
-                    .get_datum_by_ordinal(c)
-                    .ok()
-                    .and_then(|d| d.value::<String>().ok().flatten());
-                let s = val.unwrap_or_else(|| "NULL".to_string());
-                let fqn = &fqn_cols[c - 1];
-                cells.push(if is_sensitive(fqn, sensitive) {
-                    "<redacted>".to_string()
-                } else {
-                    truncate_cell(&s)
-                });
-            }
-            rows.push(cells);
+/// Expand `sensitive_columns` patterns so the render helper's bare-name +
+/// dotted-suffix matcher picks up FQN-style patterns like
+/// `public.users.password`. The original pattern is preserved; for any
+/// dotted form whose tail matches `schema.table.*`, we also push the
+/// bare column suffix so a bare column from the JSON wrapper still
+/// matches.
+fn expand_patterns_for_table(
+    schema: &str,
+    table: &str,
+    patterns: &[String],
+) -> Vec<String> {
+    let prefix = format!("{schema}.{table}.").to_ascii_lowercase();
+    let table_prefix = format!("{table}.").to_ascii_lowercase();
+    let mut out: Vec<String> = Vec::with_capacity(patterns.len() * 2);
+    for p in patterns {
+        let lower = p.to_ascii_lowercase();
+        out.push(p.clone());
+        // `public.users.password` while sampling public.users → also match `password`.
+        if let Some(tail) = lower.strip_prefix(&prefix) {
+            out.push(tail.to_string());
         }
-
-        // (Audit row was written above, before transaction_read_only
-        // was flipped, with row_count = -1.)
-
-        Ok(render_table(&col_names, &rows))
-    })
-}
-
-fn is_sensitive(fqn: &str, patterns: &[String]) -> bool {
-    if patterns.is_empty() {
-        return false;
+        // `users.password` while sampling *.users → also match `password`.
+        else if let Some(tail) = lower.strip_prefix(&table_prefix) {
+            out.push(tail.to_string());
+        }
     }
-    // Exact match or suffix match: "public.users.password" matches
-    // both "public.users.password" and "users.password".
-    patterns.iter().any(|p| {
-        fqn == p || fqn.ends_with(&format!(".{p}"))
-    })
-}
-
-fn truncate_cell(s: &str) -> String {
-    if s.chars().count() > MAX_CELL_CHARS {
-        let cut: String = s.chars().take(MAX_CELL_CHARS).collect();
-        format!("{cut}…")
-    } else {
-        s.to_string()
-    }
-}
-
-fn render_table(cols: &[String], rows: &[Vec<String>]) -> String {
-    if rows.is_empty() {
-        return format!("(0 rows)\ncolumns: {}", cols.join(", "));
-    }
-    let widths: Vec<usize> = cols
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let max_cell = rows
-                .iter()
-                .map(|r| r.get(i).map(|s| s.chars().count()).unwrap_or(0))
-                .max()
-                .unwrap_or(0);
-            name.chars().count().max(max_cell)
-        })
-        .collect();
-
-    let mut out = String::new();
-    fmt_row(&mut out, cols.iter().map(String::as_str), &widths);
-    fmt_sep(&mut out, &widths);
-    for row in rows {
-        fmt_row(&mut out, row.iter().map(String::as_str), &widths);
-    }
-    out.push_str(&format!("\n({} rows)", rows.len()));
     out
-}
-
-fn fmt_row<'a, I: Iterator<Item = &'a str>>(out: &mut String, cells: I, widths: &[usize]) {
-    let parts: Vec<String> = cells
-        .zip(widths.iter())
-        .map(|(c, w)| format!("{:<width$}", c, width = w))
-        .collect();
-    out.push_str(&parts.join(" | "));
-    out.push('\n');
-}
-
-fn fmt_sep(out: &mut String, widths: &[usize]) {
-    let parts: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
-    out.push_str(&parts.join("-+-"));
-    out.push('\n');
 }
 
 /// Minimal identifier quoting — only double-quote when needed.

@@ -12,14 +12,13 @@
 //! can self-correct (typos, wrong column names, etc.) instead of aborting
 //! the entire `ask()` invocation.
 
+use super::render::{self, RenderedTable};
 use super::{Tool, ToolOutput};
 use crate::infra::errors::{AskError, Result};
 use crate::providers::ToolSpec;
 use crate::sql_guard::{self, GuardMode};
 use pgrx::prelude::*;
 use serde_json::json;
-
-const MAX_CELL_CHARS: usize = 500;
 
 pub struct SqlQueryTool {
     pub readonly: bool,
@@ -81,17 +80,6 @@ impl Tool for SqlQueryTool {
     }
 }
 
-/// Column-level redaction. Patterns may be exact column names or
-/// dotted suffixes (e.g. `users.password` or just `password`).
-fn is_sensitive_col(col: &str, patterns: &[String]) -> bool {
-    if patterns.is_empty() {
-        return false;
-    }
-    patterns.iter().any(|p| {
-        col == p || col.ends_with(&format!(".{p}"))
-    })
-}
-
 fn ok(text: String) -> ToolOutput {
     ToolOutput {
         text,
@@ -111,6 +99,10 @@ fn err(msg: &str) -> ToolOutput {
 /// Postgres longjmp errors into Rust panics that propagate as `Result::Err`
 /// through `SpiResult`, and wrapping `catch_unwind` over a SPI boundary
 /// risks leaving Postgres' error stack in an inconsistent state.
+///
+/// Datum extraction is delegated to `super::render::run_to_table` which
+/// wraps the query in `row_to_json(...)::text` to get native PG → text
+/// conversion for every column type. See that module's docs for why.
 fn run_query_to_text(
     query: &str,
     readonly: bool,
@@ -121,31 +113,33 @@ fn run_query_to_text(
     let timeout_sql = format!("SET LOCAL statement_timeout = {statement_timeout_ms}");
     let readonly_sql = "SET LOCAL transaction_read_only = on";
 
-    Spi::connect_mut(|client| -> std::result::Result<String, String> {
+    // We need TWO SPI sessions back-to-back: the first writes the audit
+    // row and sets the GUCs, the second executes the (potentially
+    // readonly) user query via the shared `render` helper. Splitting
+    // them keeps the helper unaware of audit/GUC concerns and lets us
+    // share it with `sample_table` / `user_defined` cleanly.
+    Spi::connect_mut(|client| -> std::result::Result<(), String> {
         // Audit FIRST, before we flip transaction_read_only. The audit
-        // row carries row_count = -1 to mean "query is about to run, no
-        // result yet"; we don't update it after the fact because doing
-        // so would require a second statement under the readonly GUC
-        // that we're about to set. -1 is documented in the column
-        // comment and `ask._sql_audit` consumers treat it as "in flight
-        // / unknown". Without this ordering, every sql_query call in
-        // readonly mode (the default) ERRORs with "cannot execute
-        // INSERT in a read-only transaction" on its own audit insert,
-        // which then poisons the outer transaction.
+        // row carries row_count = -1 ("in flight / unknown"); without
+        // this ordering, every sql_query call in readonly mode would
+        // ERROR with "cannot execute INSERT in a read-only transaction"
+        // on its own audit insert, which then poisons the outer
+        // transaction. See H2 / H3 in the review for the planned
+        // subtransaction-based fix that will let us update row_count
+        // after the query runs.
+        // Audit via SECURITY DEFINER helper (C3) so PUBLIC doesn't need
+        // INSERT on ask._sql_audit. The helper stamps session_user as
+        // the caller, which is what we want even from inside ask.ask().
         let _ = client.update(
-            "INSERT INTO ask._sql_audit (query, row_count, readonly, tool_name) \
-             VALUES ($1, $2, $3, 'sql_query')",
+            "SELECT ask._sql_audit_insert($1, $2, $3, 'sql_query')",
             None,
             &[query.into(), (-1i32).into(), readonly.into()],
         );
 
-        // GUC scope: SET LOCAL is automatically rolled back at end of the
-        // outer transaction. Inside the same transaction these stay in
-        // effect for every subsequent statement, including the user's
-        // remaining work — that's why we restore them in the cleanup at the
-        // bottom. (Worth noting: in the typical ask.ask() call the only
-        // statement that runs *after* ours is the tool result feed-back,
-        // which doesn't hit SPI again, so restoring is belt-and-braces.)
+        // GUC scope: SET LOCAL is rolled back at end of the outer
+        // transaction. Inside the same transaction these stay in effect
+        // for every subsequent statement — see H2 in the review for the
+        // planned savepoint-based isolation.
         client
             .update(timeout_sql.as_str(), None, &[])
             .map_err(|e| e.to_string())?;
@@ -154,102 +148,9 @@ fn run_query_to_text(
                 .update(readonly_sql, None, &[])
                 .map_err(|e| e.to_string())?;
         }
+        Ok(())
+    })?;
 
-        let tuptable = client
-            .select(query, None, &[])
-            .map_err(|e| e.to_string())?;
-
-        let columns = tuptable.columns().map_err(|e| e.to_string())?;
-        let col_names: Vec<String> = (1..=columns)
-            .map(|i| {
-                tuptable
-                    .column_name(i)
-                    .unwrap_or_else(|_| format!("col{i}"))
-            })
-            .collect();
-
-        let mut rows: Vec<Vec<String>> = Vec::new();
-        let mut truncated = false;
-
-        for (idx, row) in tuptable.into_iter().enumerate() {
-            if idx >= max_rows {
-                truncated = true;
-                break;
-            }
-            let mut cells: Vec<String> = Vec::with_capacity(col_names.len());
-            for c in 1..=col_names.len() {
-                let val: Option<String> = row
-                    .get_datum_by_ordinal(c)
-                    .ok()
-                    .and_then(|d| d.value::<String>().ok().flatten());
-                let s = val.unwrap_or_else(|| "NULL".to_string());
-                let col_name = col_names.get(c - 1).map(String::as_str).unwrap_or("");
-                cells.push(if is_sensitive_col(col_name, sensitive) {
-                    "<redacted>".to_string()
-                } else {
-                    truncate_cell(&s)
-                });
-            }
-            rows.push(cells);
-        }
-
-        // (Audit row was written above, before transaction_read_only
-        // was flipped, with row_count = -1.)
-
-        Ok(render_table(&col_names, &rows, truncated, max_rows))
-    })
-}
-
-fn truncate_cell(s: &str) -> String {
-    if s.chars().count() > MAX_CELL_CHARS {
-        let cut: String = s.chars().take(MAX_CELL_CHARS).collect();
-        format!("{cut}…")
-    } else {
-        s.to_string()
-    }
-}
-
-fn render_table(cols: &[String], rows: &[Vec<String>], truncated: bool, cap: usize) -> String {
-    if rows.is_empty() {
-        return format!("(0 rows)\ncolumns: {}", cols.join(", "));
-    }
-    let widths: Vec<usize> = cols
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let max_cell = rows
-                .iter()
-                .map(|r| r.get(i).map(|s| s.chars().count()).unwrap_or(0))
-                .max()
-                .unwrap_or(0);
-            name.chars().count().max(max_cell)
-        })
-        .collect();
-
-    let mut out = String::new();
-    fmt_row(&mut out, cols.iter().map(String::as_str), &widths);
-    fmt_sep(&mut out, &widths);
-    for row in rows {
-        fmt_row(&mut out, row.iter().map(String::as_str), &widths);
-    }
-    out.push_str(&format!("\n({} rows)", rows.len()));
-    if truncated {
-        out.push_str(&format!(" — truncated at {cap}"));
-    }
-    out
-}
-
-fn fmt_row<'a, I: Iterator<Item = &'a str>>(out: &mut String, cells: I, widths: &[usize]) {
-    let parts: Vec<String> = cells
-        .zip(widths.iter())
-        .map(|(c, w)| format!("{:<width$}", c, width = w))
-        .collect();
-    out.push_str(&parts.join(" | "));
-    out.push('\n');
-}
-
-fn fmt_sep(out: &mut String, widths: &[usize]) {
-    let parts: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
-    out.push_str(&parts.join("-+-"));
-    out.push('\n');
+    let RenderedTable { text, .. } = render::run_to_table(query, max_rows, sensitive)?;
+    Ok(text)
 }

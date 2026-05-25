@@ -7,6 +7,7 @@
 pub mod describe_table;
 pub mod http_fetch;
 pub mod recall;
+pub mod render;
 pub mod sample_table;
 pub mod sql_query;
 pub mod user_defined;
@@ -66,10 +67,18 @@ pub fn default_toolset(
         tools.push(Box::new(recall::RecallTool));
     }
     if cfg.allow_http {
-        tools.push(Box::new(http_fetch::HttpFetchTool {
-            http,
-            allow_list: cfg.http_allow_list.clone(),
-        }));
+        // We deliberately do NOT reuse the provider HttpClient here:
+        // http_fetch needs redirects(0) + tighter body cap (C5 SSRF
+        // fix), which the provider client doesn't want. The `http`
+        // parameter remains in the signature for future tools that
+        // legitimately want the shared agent.
+        let _ = &http;
+        tools.push(Box::new(http_fetch::HttpFetchTool::new(
+            cfg.http_connect_timeout_ms,
+            cfg.http_total_timeout_ms,
+            cfg.http_allow_list.clone(),
+            cfg.allow_private_hosts,
+        )));
     }
     // sample_table is always available — cheap, safe, and often the first
     // thing the model needs when exploring an unfamiliar schema.

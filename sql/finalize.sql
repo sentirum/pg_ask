@@ -1,0 +1,28 @@
+-- pg_ask finalize SQL.
+--
+-- This script runs AFTER pgrx has emitted the schema for all #[pg_extern]
+-- functions, which means the user-facing `ask.*` entry points exist and
+-- can be GRANTed / REVOKEd here. Anything that needs to reference them
+-- by name belongs in this file rather than bootstrap.sql.
+--
+-- ---------------------------------------------------------------------------
+-- C6 (v0.5.2 review): config-surface lockdown.
+--
+-- `ask.config(key, value)` writes into ask._config; `ask.get_config(key)`
+-- reads from it. pgrx emits both with the default EXECUTE TO PUBLIC, so
+-- a role with USAGE on the `ask` schema but no operator privileges
+-- could otherwise:
+--   * read api_key out of the table fallback, or
+--   * write its own api_key under another role's identity (the function
+--     is SECURITY DEFINER, which would have stamped owner == definer).
+--
+-- The Rust `get_config` already redacts SECRET_KEYS before returning,
+-- so this REVOKE is a second line of defence: even if a future change
+-- forgets to redact, PUBLIC can't reach the function.
+--
+-- Operators who want to expose these to a specific role should issue:
+--   GRANT EXECUTE ON FUNCTION ask.config(text, text) TO operator_role;
+--   GRANT EXECUTE ON FUNCTION ask.get_config(text)   TO operator_role;
+-- after CREATE EXTENSION.
+REVOKE ALL ON FUNCTION ask.config(text, text)     FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask.get_config(text)       FROM PUBLIC;

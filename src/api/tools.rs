@@ -29,9 +29,12 @@ fn register_tool(name: &str, spec: pgrx::Json, body: &str) -> bool {
 
 fn do_register(name: &str, spec: serde_json::Value, body: &str) -> Result<(), AskError> {
     let spec_text = spec.to_string();
+    // Route through the SECURITY DEFINER helper (C3): _tools no longer
+    // accepts direct INSERT/UPDATE from PUBLIC, and the helper enforces
+    // that an existing row with a different owner cannot be overwritten
+    // (raises insufficient_privilege instead of silently stealing it).
     pgrx::Spi::run_with_args(
-        "INSERT INTO ask._tools (name, spec, body) VALUES ($1, $2::jsonb, $3)
-         ON CONFLICT (name) DO UPDATE SET spec = EXCLUDED.spec, body = EXCLUDED.body, updated_at = now()",
+        "SELECT ask._tool_register($1, $2::jsonb, $3)",
         &[name.into(), spec_text.as_str().into(), body.into()],
     )?;
     Ok(())
@@ -48,15 +51,10 @@ fn unregister_tool(name: &str) -> bool {
 }
 
 fn do_unregister(name: &str) -> Result<bool, AskError> {
-    let deleted: Option<bool> = Spi::get_one_with_args(
-        "WITH d AS (
-             DELETE FROM ask._tools
-              WHERE name = $1 AND owner = current_user
-              RETURNING 1
-         )
-         SELECT EXISTS (SELECT 1 FROM d)",
-        &[name.into()],
-    )?;
+    // Helper-routed for C3; semantics unchanged — ownership check
+    // collapses with "not found" so we don't leak existence.
+    let deleted: Option<bool> =
+        Spi::get_one_with_args("SELECT ask._tool_unregister($1)", &[name.into()])?;
     Ok(deleted.unwrap_or(false))
 }
 

@@ -64,6 +64,7 @@ pub fn with_trace<T>(
                 memory_enabled: false,
                 allow_http: false,
                 http_allow_list: Vec::new(),
+                allow_private_hosts: false,
                 sensitive_columns: Vec::new(),
             },
             question,

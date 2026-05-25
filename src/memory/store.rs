@@ -59,19 +59,21 @@ pub fn insert(
     let embedding_lit = encode_vector(embedding);
     let metadata_text = metadata.to_string();
 
+    // Route through the SECURITY DEFINER helper rather than direct
+    // INSERT: PUBLIC no longer holds INSERT on ask._memories (see C3 in
+    // the v0.5.2 review and the corresponding bootstrap.sql comment).
+    // The helper stamps owner = session_user and is the only INSERT
+    // path into the table.
     let id: Option<Uuid> = Spi::get_one_with_args(
-        "INSERT INTO ask._memories
-            (content, namespace, metadata, embedding)
-         VALUES ($1, $2, $3::jsonb, $4::vector)
-         RETURNING id",
+        "SELECT ask._memory_insert($1, $2, $3::jsonb, $4)",
         &[
-            content.into(),
             namespace.into(),
+            content.into(),
             metadata_text.as_str().into(),
             embedding_lit.as_str().into(),
         ],
     )?;
-    id.ok_or_else(|| AskError::Sql("INSERT INTO _memories returned no id".into()))
+    id.ok_or_else(|| AskError::Sql("_memory_insert returned no id".into()))
 }
 
 /// List every namespace the caller has ever stored something under,
@@ -190,18 +192,12 @@ pub fn list_memories(
 }
 
 pub fn delete(id: Uuid) -> Result<bool> {
-    // RETURNING-based bool tells us whether ANY row was deleted; combined
-    // with the WHERE filter we can't distinguish "wrong owner" from
-    // "doesn't exist", which is exactly the NotFound-collapse we want.
-    let deleted: Option<bool> = Spi::get_one_with_args(
-        "WITH d AS (
-             DELETE FROM ask._memories
-              WHERE id = $1 AND owner = current_user
-              RETURNING 1
-         )
-         SELECT EXISTS (SELECT 1 FROM d)",
-        &[id.into()],
-    )?;
+    // Route through the SECURITY DEFINER helper. It runs the
+    // owner-checked DELETE itself and returns whether a row was
+    // removed; we can't distinguish "wrong owner" from "doesn't exist",
+    // which is the NotFound-collapse the higher layer relies on.
+    let deleted: Option<bool> =
+        Spi::get_one_with_args("SELECT ask._memory_delete_owned($1)", &[id.into()])?;
     Ok(deleted.unwrap_or(false))
 }
 

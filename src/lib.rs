@@ -52,6 +52,10 @@ mod ask {}
 // to re-export anything here — declaring the modules is enough.
 
 ::pgrx::extension_sql_file!("../sql/bootstrap.sql", name = "bootstrap", bootstrap);
+// Finalize runs AFTER pgrx emits the schema for #[pg_extern] functions,
+// so it can reference user-facing entry points like `ask.config` /
+// `ask.get_config` by name (C6 lockdown).
+::pgrx::extension_sql_file!("../sql/finalize.sql", name = "finalize", finalize);
 
 // ---------- GUC registration ----------
 
@@ -262,9 +266,17 @@ pub extern "C-unwind" fn _PG_init() {
     );
     GucRegistry::define_string_guc(
         c"pg_ask.http_allow_list",
-        c"Comma-separated URL prefixes allowed for http_fetch.",
-        c"Empty = deny all. Each request must start with one of these prefixes.",
+        c"Comma-separated allow-list entries for http_fetch.",
+        c"Each entry is either a bare host (api.example.com) or a full URL with optional path prefix (https://api.example.com/v1). Empty = deny all.",
         &HTTP_ALLOW_LIST,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"pg_ask.allow_private_hosts",
+        c"Allow http_fetch to call private/loopback IP addresses (off by default).",
+        c"Opt-in for self-hosted setups. Without this, literal IPs in 10/8, 172.16/12, 192.168/16, 127/8, 169.254/16, 100.64/10, ::1, fc00::/7, fe80::/10 are rejected even if allow-listed.",
+        &ALLOW_PRIVATE_HOSTS,
         GucContext::Userset,
         GucFlags::default(),
     );

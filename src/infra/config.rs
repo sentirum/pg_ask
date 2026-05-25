@@ -82,6 +82,11 @@ pub static ALLOW_HTTP: GucSetting<bool> = GucSetting::<bool>::new(false);
 pub static HTTP_ALLOW_LIST: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(None);
 
+/// When `on`, `http_fetch` will permit literal-IP hosts in private /
+/// loopback / link-local / CGNAT ranges. Off by default to make SSRF
+/// through a wrong allow-list entry harder. See C5 in the v0.5.2 review.
+pub static ALLOW_PRIVATE_HOSTS: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 /// Comma-separated list of `schema.table.column` patterns that the
 /// `sql_query` tool redacts before returning results to the model.
 /// The cell text is replaced with `<redacted>`; the column name is
@@ -127,6 +132,10 @@ pub struct RuntimeConfig {
     // v0.4
     pub allow_http: bool,
     pub http_allow_list: Vec<String>,
+    /// When true, the http_fetch tool skips the private/loopback/CGNAT
+    /// IP guard. Off by default; opt-in for self-hosted setups talking
+    /// to internal services. See C5 in the v0.5.2 review.
+    pub allow_private_hosts: bool,
     pub sensitive_columns: Vec<String>,
 }
 
@@ -181,6 +190,7 @@ impl RuntimeConfig {
             memory_enabled: MEMORY_ENABLED.get(),
             allow_http: ALLOW_HTTP.get(),
             http_allow_list: comma_list(&HTTP_ALLOW_LIST),
+            allow_private_hosts: ALLOW_PRIVATE_HOSTS.get(),
             sensitive_columns: comma_list(&SENSITIVE_COLUMNS),
         })
     }
@@ -278,6 +288,7 @@ const KNOWN_KEYS: &[&str] = &[
     "memory_enabled",
     "allow_http",
     "http_allow_list",
+    "allow_private_hosts",
     "sensitive_columns",
 ];
 
