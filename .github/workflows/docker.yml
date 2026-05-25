@@ -7,9 +7,9 @@ on:
   workflow_dispatch:   # manual re-run from the Actions UI
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.5.2)"
+        description: "Tag to build (e.g. v0.5.3)"
         required: true
-        default: "v0.5.2"
+        default: "v0.5.3"
 
 env:
   REGISTRY: ghcr.io
@@ -19,16 +19,115 @@ permissions:
   contents: read
   packages: write      # needed to push to GHCR
 
+# ──────────────────────────────────────────────────────────
+# Multi-arch strategy: NATIVE runners per platform, no QEMU.
+#
+# Earlier versions of this workflow built linux/amd64 and
+# linux/arm64 in one job via `docker buildx build --platform
+# linux/amd64,linux/arm64`. arm64 went through QEMU emulation
+# on the x86_64 runner; cargo compiling pgrx + ring + rustls
+# under QEMU took ~2h and routinely hit GH Actions' 6h limit.
+#
+# GitHub (Jan 2025+) gives public repos free `ubuntu-24.04-arm`
+# native arm64 runners with the same pricing as x86_64. The
+# matrix below uses each platform's native runner so each build
+# takes the same ~5–10 min as the local x86_64 path used to.
+#
+# Pipeline:
+#
+#   build (matrix) ─┬─ amd64 on ubuntu-24.04         ─► digest
+#                   └─ arm64 on ubuntu-24.04-arm     ─► digest
+#                              │
+#                              ▼
+#                       merge (manifest list)
+#                              │
+#                              ▼
+#         ghcr.io/sentirum/pg_ask:{VERSION-pg18,latest-pg18}
+#
+# Each build job pushes a digest-only image (no tag). The merge
+# job then assembles the per-platform digests into a multi-arch
+# manifest under the human-readable tags. This is the pattern
+# docker/build-push-action's own README recommends for native
+# multi-arch.
+# ──────────────────────────────────────────────────────────
+
 jobs:
-  build-push:
-    name: Build & push multi-arch Docker image
-    runs-on: ubuntu-24.04
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner:   ubuntu-24.04
+            arch:     amd64
+          - platform: linux/arm64
+            runner:   ubuntu-24.04-arm
+            arch:     arm64
 
     steps:
       - uses: actions/checkout@v4
 
-      # ── Meta ────────────────────────────────────────
-      - name: Extract version from tag
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Per-platform build, digest-only push (no tag yet). The
+      # manifest assembly happens in the `merge` job once both
+      # arch builds have completed. Cache is keyed per-arch so
+      # the two builds don't trash each other's layer cache.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # `outputs: type=image,push-by-digest=true` makes
+          # buildx push the layers to GHCR but emit a manifest
+          # digest instead of a tag. The merge step consumes
+          # the digest via the metadata file.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.arch }}
+          cache-to:   type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.arch }},mode=max
+          build-args: |
+            PG_MAJOR=18
+            PGRX_VERSION=0.18.0
+
+      # Stage the digest for the merge job. Using one file per
+      # platform under a shared directory keeps the upload tidy
+      # without baking platform names into the filename glob.
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          DIGEST="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Assemble multi-arch manifest
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Meta (same source of truth as the build) ─────
+      - name: Extract version
         id: version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -37,8 +136,8 @@ jobs:
             TAG="${GITHUB_REF_NAME}"
           fi
           VER="${TAG#v}"
-          echo "tag=$TAG"       >> "$GITHUB_OUTPUT"
-          echo "version=$VER"   >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
 
       - name: Docker metadata (tags + labels)
         id: meta
@@ -46,9 +145,7 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            # versioned tag:  ghcr.io/sentirum/pg_ask:0.5.2-pg18
             type=raw,value=${{ steps.version.outputs.version }}-pg18
-            # moving latest:  ghcr.io/sentirum/pg_ask:latest-pg18
             type=raw,value=latest-pg18
           labels: |
             org.opencontainers.image.title=pg_ask
@@ -56,17 +153,16 @@ jobs:
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.licenses=PostgreSQL
 
-      # ── Build infra ──────────────────────────────────
-      #    QEMU allows building linux/arm64 images on
-      #    x86_64 runners via emulation. For arm64 the
-      #    compilation will be slow but correct.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ── GHCR login ───────────────────────────────────
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -74,19 +170,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── Build + push ─────────────────────────────────
-      #    Build cache from/to the registry so repeated
-      #    tag pushes don't recompile cargo from scratch.
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags:   ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
-          cache-to:   type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
-          build-args: |
-            PG_MAJOR=18
-            PGRX_VERSION=0.18.0
+      # `buildx imagetools create` reads the digest files we
+      # uploaded (one per platform) and stitches them into a
+      # single manifest list, then pushes it under every tag
+      # the metadata-action computed.
+      - name: Create + push manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' \
+                  <<<'${{ steps.meta.outputs.json }}') \
+            $(printf "${{ env.IMAGE }}@sha256:%s " *)
+
+      - name: Inspect manifest
+        run: |
+          docker buildx imagetools inspect \
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-pg18
