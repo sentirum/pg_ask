@@ -29,7 +29,7 @@ use pgrx::prelude::*;
 
 mod agent;
 mod api;
-// mod bgworker; // v0.5 prototype — re-enable after cargo pgrx test passes
+mod bgworker;
 mod embeddings;
 mod infra;
 mod memory;
@@ -187,7 +187,7 @@ pub extern "C-unwind" fn _PG_init() {
     );
 
     // ---------- Background worker (v0.5) ----------
-    // bgworker::register(); // re-enable with mod bgworker above
+    bgworker::register();
 
     // ---------- Memory / embedding (v0.3) ----------
     GucRegistry::define_string_guc(

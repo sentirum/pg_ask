@@ -1,7 +1,14 @@
 comment = 'Agent-driven natural language interface for PostgreSQL'
 default_version = '0.5.1'
 module_pathname = '$libdir/pg_ask'
+# Do NOT set `schema = 'ask'` here. pgrx already emits an explicit
+# `CREATE SCHEMA IF NOT EXISTS ask` plus fully-qualified `ask.*`
+# identifiers in the generated install script. If we also pin the
+# control-file schema, Postgres expects `ask` to pre-exist and treats
+# the script's CREATE SCHEMA as a non-extension object, then refuses
+# CREATE EXTENSION with "schema ask is not a member of extension". By
+# omitting it, the schema created in the script is auto-bound to the
+# extension at install time, which is exactly what we want.
 relocatable = false
 superuser = false
-schema = 'ask'
 trusted = false

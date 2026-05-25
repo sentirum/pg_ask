@@ -1,0 +1,11 @@
+[target.'cfg(target_os="macos")']
+# Postgres symbols (palloc, SPI_*, errstart, …) live in the running
+# postgres backend, not in any library we link against. On macOS the
+# linker is strict and refuses to leave them unresolved unless we
+# explicitly ask for it. Without this flag `cargo pgrx test`,
+# `cargo pgrx install`, and any other build that produces a cdylib
+# fail with "ld: symbol(s) not found for architecture arm64".
+#
+# This matches the template that `cargo pgrx new` generates for fresh
+# projects (cargo-pgrx-0.18.0/src/templates/cargo_config_toml).
+rustflags = ["-Clink-arg=-Wl,-undefined,dynamic_lookup"]

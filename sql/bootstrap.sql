@@ -1,6 +1,12 @@
 -- pg_ask bootstrap schema.
 -- Loaded by the extension at CREATE EXTENSION time.
 
+-- Create the install schema explicitly. With no `schema = '…'` in
+-- pg_ask.control, Postgres treats the first object we create here as
+-- the extension's owned schema and binds it accordingly. This must run
+-- BEFORE any qualified `ask.<table>` reference below, otherwise the
+-- catalog has nowhere to put the relation.
+CREATE SCHEMA IF NOT EXISTS ask;
 
 -- Configuration key/value store. API keys live here; revoke usage on the
 -- schema for least-privileged roles in production.
@@ -166,7 +172,7 @@ CREATE INDEX IF NOT EXISTS _sql_audit_caller_idx ON ask._sql_audit (caller, ts D
 -- Lock down internals by default. Users get the public-facing functions via
 -- explicit GRANT in their setup script. _traces stays readable so operators
 -- can audit without extra grants; the writer above is the only INSERT path.
-REVOKE ALL ON ALL TABLES IN SCHEMA pg_ask FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA ask FROM PUBLIC;
 GRANT  SELECT  ON ask._traces     TO PUBLIC;
 GRANT  SELECT  ON ask._tools      TO PUBLIC;
 GRANT  SELECT  ON ask._sql_audit  TO PUBLIC;
@@ -179,7 +185,7 @@ GRANT  EXECUTE ON FUNCTION ask._write_trace(jsonb) TO PUBLIC;
 DO $reapply_grants$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_class
-                WHERE relnamespace = 'pg_ask'::regnamespace
+                WHERE relnamespace = 'ask'::regnamespace
                   AND relname = '_memories') THEN
         EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ask._memories TO PUBLIC';
     END IF;
