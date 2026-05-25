@@ -24,13 +24,16 @@ SELECT ask.sql('top 5 customers by lifetime revenue');
 > Postgres ties a GUC namespace to the extension name, not its install
 > schema.
 
-> **Status:** v0.5 complete — Anthropic + OpenAI + Gemini chat,
-> OpenAI / Voyage / Gemini embeddings, pgvector-backed long-term memory
-> (hybrid cosine + BM25-style ranking), multi-turn sessions, audit log,
-> agent loop, readonly SQL tool, HTTP fetch (allow-list gated), sample
-> table tool, user-defined tools, RLS-aware schema dump, column redaction,
-> streaming SRF (`ask_stream`), real SQL parser for `sql_guard`,
-> background-worker prototype.
+> **Status:** v0.5.2 — hardening release. v0.5 feature set
+> (Anthropic + OpenAI + Gemini chat, OpenAI / Voyage / Gemini embeddings,
+> pgvector-backed long-term memory, multi-turn sessions, audit log,
+> agent loop, readonly SQL tool, HTTP fetch with SSRF defence,
+> sample-table + user-defined tools, RLS-aware schema dump, column
+> redaction, streaming SRF, real SQL parser) **plus** 25 security /
+> correctness / performance fixes across three review waves. End-to-end
+> verified against a live PG18 backend with ZAI GLM-5.1 over the
+> Anthropic-compatible endpoint, including a four-turn `ask.chat`
+> anaphora canary. 75/75 tests green. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Why
 
@@ -47,23 +50,30 @@ SELECT ask.ask('…')
         │
         ▼
   ┌─────────────────────────────────┐
-  │ agent loop (src/agent.rs)       │
-  │   ├─ schema::summarize()        │  ← pg_catalog
+  │ agent loop (src/agent/)         │
+  │   ├─ schema::summarize()        │  ← pg_catalog (cached, 60s TTL)
   │   ├─ provider.complete(…)       │  ← Anthropic / OpenAI / Gemini (HTTP)
   │   └─ tool dispatch              │
-  │        └─ sql_query (SPI)       │  ← same backend, same transaction
+  │        ├─ sql_query  (SPI)      │  ← runs inside a Postgres subtxn,
+  │        ├─ sample_table          │     statement_timeout + readonly
+  │        ├─ describe_table        │     scoped per call
+  │        ├─ http_fetch            │  ← SSRF: URL parser + IP CIDR check
+  │        ├─ recall (pgvector)     │
+  │        └─ user-defined tool     │  ← {{key}} → $N parameterised
   └─────────────────────────────────┘
 ```
 
-- **Pure Rust + pgrx 0.18**, PostgreSQL 14–18.
+- **Pure Rust + pgrx 0.18**, PostgreSQL 14–18 (production tested on PG18).
 - **SPI in caller's transaction** — tool reads are consistent with the
   surrounding query.
 - **Readonly by default** — `sql_query` rejects anything that isn't
   `SELECT`/`WITH`/`EXPLAIN`/`TABLE`.
+- **Each tool call wrapped in a Postgres subtransaction** (`src/infra/subtxn.rs`)
+  — a failed model-emitted query no longer poisons the agent loop.
 - **Cooperative cancellation** via `check_for_interrupts!()` between
   iterations, so `pg_cancel_backend` works.
-- **No `unsafe` in our code**; all I/O is blocking `ureq` (PG backend is
-  single-threaded, no async runtime).
+- **No `unsafe` outside `src/infra/subtxn.rs`**; all I/O is blocking `ureq`
+  (PG backend is single-threaded, no async runtime).
 
 ## Install (development)
 
@@ -93,17 +103,95 @@ SELECT ask.config('api_key',  :'anthropic_key');
 SELECT ask.ask('list all tables and their row counts');
 ```
 
+### Install against an existing PostgreSQL
+
+```bash
+git clone https://github.com/sentirum/pg_ask
+cd pg_ask
+cargo pgrx install --release --features pg18    # writes into $PGHOME/lib
+psql -c 'CREATE EXTENSION pg_ask;'
+```
+
+### Upgrade from 0.5.1
+
+```sql
+ALTER EXTENSION pg_ask UPDATE TO '0.5.2';
+```
+
+No public-surface changes; the script reapplies the SECURITY DEFINER
+writer helpers, the table-level lockdown, and the
+`ask._sql_audit.latency_ms` column. See [`CHANGELOG.md`](CHANGELOG.md).
+
+## Quickstart — choose a provider
+
+Any OpenAI-compatible, Anthropic-compatible, or Gemini endpoint works. The
+extension recognises the following provider aliases out of the box;
+anything else can be reached by setting `provider` to the closest
+protocol family and overriding `base_url`.
+
+```sql
+-- Anthropic
+SELECT ask.config('provider', 'anthropic');
+SELECT ask.config('model',    'claude-sonnet-4-5');
+SELECT ask.config('api_key',  :'anthropic_key');
+
+-- ZAI (Anthropic-compatible) with GLM-5.1 — end-to-end verified
+SELECT ask.config('provider', 'anthropic');
+SELECT ask.config('base_url', 'https://api.z.ai/api/anthropic');
+SELECT ask.config('model',    'glm-5.1');
+SELECT ask.config('api_key',  :'zai_key');
+
+-- OpenAI (also Groq, Together, Mistral, Ollama, vLLM, LM Studio)
+SELECT ask.config('provider', 'openai');           -- or 'groq', 'ollama', …
+SELECT ask.config('model',    'gpt-4o-mini');
+SELECT ask.config('api_key',  :'openai_key');
+-- For self-hosted / proxy endpoints, additionally set
+SELECT ask.config('base_url', 'http://localhost:11434/v1');
+
+-- Gemini
+SELECT ask.config('provider', 'gemini');           -- or 'google'
+SELECT ask.config('model',    'gemini-1.5-pro');
+SELECT ask.config('api_key',  :'gemini_key');
+```
+
+Then ask:
+
+```sql
+SELECT ask.ask('what is the total revenue per category last month?');
+```
+
 ## Configuration
 
 | Key              | Default                     | Notes                                          |
 |------------------|-----------------------------|------------------------------------------------|
 | `provider`       | *(required)*                | `anthropic` · `openai` (also `groq`/`together`/`mistral`/`ollama`/`vllm`/`lmstudio` via `base_url`) · `gemini` (also `google`, `google-genai`). |
-| `api_key`        | *(required)*                | Provider API key.                              |
+| `api_key`        | *(required)*                | Provider API key. Redacted from `get_config` and `pg_settings`. |
 | `model`          | `claude-sonnet-4-5`         | Model id, provider-specific.                   |
-| `base_url`       | provider default            | For proxies / OpenAI-compatible endpoints.     |
+| `base_url`       | provider default            | For proxies / OpenAI- or Anthropic-compatible endpoints (e.g. `https://api.z.ai/api/anthropic`). |
 | `max_tokens`     | `4096`                      | Per-completion cap.                            |
 | `max_iterations` | `16`                        | Hard ceiling on the agent loop.                |
 | `readonly`       | `true`                      | When `true`, `sql_query` refuses writes.       |
+
+For the full list (timeouts, allow-lists, embedding config, schema
+budget, sensitive-column redaction, …) see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) § Configuration model.
+
+### Multi-turn sessions
+
+```sql
+SELECT ask.create_session('product analytics') AS sid \gset
+
+SELECT ask.chat(:'sid', 'list the distinct product categories');
+SELECT ask.chat(:'sid', 'of those, which has the highest total revenue?');
+SELECT ask.chat(:'sid', 'who bought it? give me each customer name and units');
+SELECT ask.chat(:'sid', 'average revenue per buyer for that category in dollars');
+```
+
+The session tracks every assistant turn and tool result so cross-turn
+anaphora ("of those", "it", "that category") resolves naturally.
+`ask._sessions.owner` defaults to `current_user`; existence and
+unauthorised access collapse to the same error, so id-space probing
+leaks no information.
 
 ### Long-term memory (v0.3, optional)
 
@@ -131,22 +219,46 @@ can pull relevant past context into the conversation on its own.
 
 ## Security
 
-API keys are stored in `ask._config`. Grant `USAGE` on the `ask`
-schema and `EXECUTE` on the public functions only to the roles that should
-be able to ask. Internal tables `REVOKE ALL` from `PUBLIC` by default.
+API keys are stored in `ask._config` and are returned redacted via
+`ask.get_config('api_key')`. Internal tables (`_config`, `_sessions`,
+`_messages`, `_memories`, `_tools`, `_sql_audit`, `_traces`)
+`REVOKE ALL FROM PUBLIC` by default and all writes go through
+`SECURITY DEFINER` helpers that enforce `session_user` ownership.
 
 For multi-tenant or untrusted-caller scenarios, run with `readonly = true`
 and gate `ask.ask` behind a `SECURITY DEFINER` wrapper that pins the
-search path and any RLS context you need.
+search path and any RLS context you need. See
+[`docs/SECURITY.md`](docs/SECURITY.md) for the full threat model and
+the production hardening checklist.
+
+## Observability
+
+```sql
+-- Every ask.ask / sql / preview / chat call lands a row
+SELECT ts, kind, provider, model, iterations, latency_ms,
+       substring(question for 60) AS q
+FROM ask._traces
+ORDER BY ts DESC LIMIT 20;
+
+-- Every SQL the model executed, with timing and row count
+SELECT ts, tool_name, readonly, row_count, latency_ms,
+       substring(query for 80) AS query
+FROM ask._sql_audit
+WHERE caller = current_user
+ORDER BY ts DESC LIMIT 20;
+```
 
 ## Docs
 
+- [`CHANGELOG.md`](CHANGELOG.md) — release-by-release diff, including the
+  full v0.5.2 hardening list.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — module layout, layering
-  rules, request lifecycle, trait contracts.
+  rules, request lifecycle, trait contracts, configuration table.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model, defence layers,
   production hardening checklist.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone plan, v0.1 → v0.5.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone plan, v0.1 → v0.5.2,
+  what's next.
 
 ## License
 
-PostgreSQL License.
+PostgreSQL License — see [`LICENSE`](LICENSE).

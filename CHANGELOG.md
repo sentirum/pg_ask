@@ -1,0 +1,282 @@
+# Changelog
+
+All notable changes to `pg_ask` are recorded here. Format loosely follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
+itself follows [Semantic Versioning](https://semver.org/) for the public
+SQL surface (`ask.*` functions, `pg_ask.*` GUCs, `ask._*` tables) and
+treats internal Rust modules as private regardless of `pub` visibility.
+
+Upgrade scripts ship as `sql/pg_ask--<from>--<to>.sql` and run
+automatically under `ALTER EXTENSION pg_ask UPDATE`.
+
+## [0.5.2] — 2026-05-25 — Hardening release
+
+A pure-hardening release: no new public surface, 25 fixes across
+security, correctness, and performance. Every change shipped on
+`main` was verified end-to-end against a live PostgreSQL 18 backend
+with the ZAI Anthropic endpoint + GLM-5.1, including a four-turn
+`ask.chat` anaphora canary ("of those" / "it" / "that category"
+all resolved correctly). Test count: 68 → **75 green**.
+
+### Security — Wave 1 (Critical)
+
+- **C1** `sql_guard` is now parser-authoritative. When the
+  `sqlparser` 0.62 (PostgreSQL dialect) walk succeeds, the lexer
+  fallback is skipped entirely; statement type, multi-statement
+  rejection, denylist checks, CTE rules, and EXPLAIN handling all
+  run off the AST. The fallback exists strictly for parse errors on
+  non-standard syntax.
+- **C2** `ask._messages`, `ask._sessions`, `ask._memories`,
+  `ask._tools`, `ask._sql_audit`, `ask._traces`: `REVOKE ALL FROM
+  PUBLIC` is now the default, and writes go through
+  `SECURITY DEFINER` helpers (`ask._write_trace`,
+  `ask._session_append`, `ask._memory_insert`,
+  `ask._tool_upsert`, `ask._sql_audit_begin`, `ask._sql_audit_finish`).
+  A single missed `WHERE owner = current_user` predicate can no
+  longer leak rows across roles.
+- **C3** `ask.config` / `ask.get_config` redact `api_key` and
+  `embedding_api_key` before returning anything to the caller.
+  `ask._config` is `REVOKE SELECT FROM PUBLIC`; reads go through
+  `ask.get_config(key)` which case-insensitively matches a small
+  redact set.
+- **C4** User-defined tools (`ask.register_tool`) compile their
+  `{{key}}` placeholders into `$N` parameters at registration time
+  and execute via `SPI_execute_with_args`. The model's argument
+  values can no longer escape into SQL syntax, however creatively
+  they're quoted. Repeated placeholders share a parameter index;
+  jsonb composites are passed as `jsonb`, not as text.
+- **C5** `http_fetch` SSRF defence: hostnames go through a real URL
+  parser (`url` crate) before the allow-list match (host equality +
+  optional path-prefix, not string `starts_with`), and every
+  resolved IP is checked against an IPv4 + IPv6 private/loopback/
+  link-local/CGNAT CIDR set before the request is issued.
+- **C6** `pg_ask.api_key` / `pg_ask.embedding_api_key` GUCs marked
+  `SUPERUSER_ONLY | NO_SHOW_ALL`. `pg_settings` and `SHOW ALL`
+  redact them for non-superusers; `pg_stat_activity.query` was
+  already safe because the value is never inlined into SQL.
+- **C7** `ask._traces`, `ask.session.list`, `ask.tools.list`,
+  `ask.memory.*` SRFs all enforce `WHERE caller / owner =
+  current_user` at the SQL level. Existence and unauthorised
+  access collapse to the same error so id-space probing leaks no
+  information.
+- **C8** SQL audit row (`ask._sql_audit`) is now inserted *before*
+  the readonly GUC is flipped (see also the v0.5.1 fix), with the
+  insert in a separate `Spi::connect_mut` scope from the per-call
+  GUC setup, so an extreme-load `statement_timeout` on the INSERT
+  itself cannot leak the readonly flag back into the parent
+  transaction.
+
+### Security — Wave 2 (High)
+
+- **H1** `sql_query` and `sample_table` accept a fresh
+  `RuntimeConfig` snapshot per call instead of re-reading config
+  inside the tool; per-row preview / per-call timeout / max-rows
+  limits cannot be raced by a concurrent `SET LOCAL`.
+- **H2** `src/infra/subtxn.rs` (the only module permitted to use
+  raw `pgrx_pg_sys` FFI) wraps Postgres
+  `BeginInternalSubTransaction` / `Release…` / `RollbackAndRelease…`
+  inside a safe `run_in_subtransaction(name, body)` helper.
+  `sql_query::run_query_to_text` now runs the model-emitted
+  statement inside that subtxn. A failed query (typo, missing
+  column, permission denied, statement_timeout, divide-by-zero,
+  …) used to abort the parent transaction and poison every
+  subsequent SPI call in the agent loop with
+  `current transaction is aborted, commands ignored`; the failure
+  is now contained, the tool returns `is_error` to the model, the
+  loop keeps going, and `audit_finish` runs normally. Shape
+  mirrors plpython's `PLy_spi_subtransaction_{begin,commit,abort}`
+  (memory context + resource owner snapshot/restore; catch via
+  pgrx `PgTryBuilder` which flushes `ErrorState` automatically).
+- **H3** (partial) per-call `statement_timeout` now lives inside
+  the H2 subtxn. Full audit-row latency stamp under readonly is
+  deferred — `transaction_read_only` is a transaction-wide flag
+  that even a subtxn cannot flip back off (confirmed by
+  guc.c's `check_transaction_read_only` hook returning
+  `ERRCODE_ACTIVE_SQL_TRANSACTION`). Documented limitation.
+- **H4** `tools::recall` now goes through the embedding provider
+  with `embedding_dimensions` validated against the actual response
+  width at call time; a misconfigured `embedding_model` surfaces
+  loudly instead of silently writing zero-vectors.
+- **H9** `infra::http::HttpClient` reuses a single shared
+  `ureq::Agent` per (connect_timeout, read_timeout) pair via a
+  process-level cache (`HttpClient::shared_agent`), so each agent
+  loop does not spin up a fresh TLS context per provider call.
+  `Mutex` poison handled with `unwrap_or_else(|e| e.into_inner())`.
+- **H10** EXPLAIN goes through the parser and is rejected whenever
+  the inner statement isn't a `SELECT`/`WITH`/`TABLE` (the model
+  used to be able to slip `EXPLAIN INSERT …` past the prefix check).
+- **H11** Token-budget renderer never falls back to the verbose
+  `pg_attribute`/`pg_class`/`pg_description` walk when the compact
+  rendering already fits — the redundant SPI round-trip cost up to
+  hundreds of milliseconds on 500-table schemas.
+- **H12** `recall` tool obeys the global `pg_ask.tool_max_rows`
+  cap before it ever reaches the model, with a hard ceiling of 25
+  results regardless of caller-requested `limit_n`.
+
+### Critical bug fix — SET LOCAL readonly leak
+
+Manual smoke testing against DeepInfra exposed a real-world
+crash: every `ask.ask()` / `ask.preview()` in readonly mode (the
+default) errored with
+
+```
+25006: cannot execute INSERT in a read-only transaction
+```
+
+as soon as `telemetry::write` tried to land the trace row. Root
+cause: three call sites issued `SET LOCAL transaction_read_only =
+on` inside a `Spi::connect_mut` block thinking the LOCAL scope was
+the SPI block. It is not — `SET LOCAL` is scoped to the enclosing
+*transaction*, so the flag persisted for the rest of the outer
+call and broke every subsequent INSERT (trace row, session turn,
+the next tool's audit insert, …).
+
+Affected sites: `src/tools/sql_query.rs::audit_begin`,
+`src/tools/sample_table.rs::run_sample`,
+`src/planner/explain.rs::run`. Fix moves the per-call SET LOCALs
+into the subtxn that already wraps the user query (sql_query +
+sample_table) or wraps EXPLAIN in a fresh subtxn (`planner::explain`).
+When the subtxn releases, Postgres pops its GUC stack frame and
+the parent transaction sees the original
+`transaction_read_only` / `statement_timeout` values again.
+
+Regression test: `readonly_ask_does_not_leak_transaction_read_only`
+forces `trace_enabled=on`, runs `ask.ask`, asserts the trace row
+landed AND a manual `CREATE TEMP TABLE` + `INSERT` in the same
+backend after `ask.ask` still works.
+
+### Performance — Wave 3
+
+- **P1** `RuntimeConfig` is loaded exactly once per top-level
+  `ask.ask` / `ask.preview` / `ask.chat` call and threaded through
+  `agent::run_with_cfg` / `run_stream_with_cfg` /
+  `memory::recall_with_cfg`. Previously the `with_trace` closure +
+  `agent::run` + the first memory tool each rebuilt the snapshot,
+  costing 2-3× the GUC reads.
+- **P2** Schema summary is memoized per backend in a `thread_local
+  Cell` with a 60-second TTL keyed by `char_budget`. A 500-table
+  schema went from 40 ms warm / hundreds of ms cold to a single
+  Atomic load on the hot path.
+- **P3** `pgvector_installed` probe latches `true` in an
+  `AtomicBool` and short-circuits; `false` is *not* memoized so
+  mid-session `CREATE EXTENSION vector` still works.
+- **P4** `HttpClient` pool: process-level cache of `ureq::Agent`s
+  keyed on `(connect_timeout_ms, total_timeout_ms)`. TLS state +
+  connection pool now amortise across the entire agent loop and
+  across `ask.*` calls in the same backend.
+- **P5** `telemetry::write` builds the trace row from a single
+  payload struct and INSERTs it via `_write_trace(jsonb)`; the
+  previous version round-tripped each column individually.
+- **P6** `tools::sql_query` and `tools::sample_table` build their
+  result text via `String::with_capacity` + `push_str`, not
+  repeated `format!`. On wide result sets the saving is real
+  because the cell-redaction pass already pre-counts cells.
+- **P8** `providers::gemini::extract_function_name` now returns
+  `Result<&str, AskError>` instead of silently rewriting an
+  unknown id to `"sql_query"`. The previous behaviour fed the
+  model a tool result with the wrong tool name attached, which
+  hides bugs and produces hallucinated follow-up calls.
+
+### Review item #11 — Stream output truncation
+
+`ask.ask_stream()` pushed the full tool result text into a single
+`SetOfIterator` element via `[tool] {} → {}`. A `sql_query` that
+returned 500 rows produced a multi-hundred-KB single line, which
+(a) blew past the libpq reply buffer for streaming consumers and
+(b) was unreadable anyway. The truncation pattern already used by
+`ToolCallTrace::from_call` is now hoisted into a shared
+`telemetry::truncate_tool_output` helper (cap exported as
+`TOOL_OUTPUT_PREVIEW_CHARS = 2000`), and both surfaces — the
+persisted trace row and the live stream — go through it. The
+model itself still sees the full output via `history`, so its
+next reasoning step has complete information. Char-boundary safe
+(verified by a UTF-8 multibyte regression test with repeated
+`ç` glyphs at the cut point).
+
+### Infrastructure
+
+- `src/infra/subtxn.rs` added. The single module in the project
+  permitted to use raw `pgrx_pg_sys` FFI. Header spells out the
+  whole-program invariants reviewers must preserve; every unsafe
+  block carries a per-call `SAFETY` comment.
+- `ask._sql_audit.latency_ms bigint` column. Wall time from audit
+  insert to result render. NULL while the row is still in flight,
+  populated by `ask._sql_audit_finish`. Idempotent
+  `ADD COLUMN IF NOT EXISTS` in bootstrap for older installs.
+- `tests/fixtures/sql_query_targets_missing_table.json` exercises
+  the H2 subtxn path under `cargo pgrx test` without any network.
+
+### Upgrade
+
+`ALTER EXTENSION pg_ask UPDATE TO '0.5.2';` runs
+`sql/pg_ask--0.5.1--0.5.2.sql`, which:
+
+1. Adds `ask._sql_audit.latency_ms bigint` if missing.
+2. Re-`REVOKE ALL` on the internal tables from `PUBLIC` and
+   re-grants the SECURITY DEFINER write helpers.
+3. Re-creates `ask._sql_audit_begin` / `_sql_audit_finish` /
+   `_write_trace` / `_session_append` / `_memory_insert` /
+   `_tool_upsert` with the current bodies and pinned `search_path`.
+
+No public-surface (`ask.*` function signature) changes.
+
+## [0.5.1] — 2026-05 — Schema rename, test framework, fixture provider
+
+See `docs/ROADMAP.md` § v0.5.1 for the full list.
+
+- Install schema renamed from `pg_ask` to `ask`. GUC keys still
+  live under `pg_ask.*` because Postgres binds them to the
+  extension name, not the install schema.
+- `cargo pgrx test` framework wired up; macOS arm64 linker flag
+  in `.cargo/config.toml`.
+- Fixture provider (`provider = 'fixture'`) for hermetic CI.
+- Audit-row write reordered to land *before* the readonly GUC
+  flip (the deeper SET LOCAL leak was caught and fixed in
+  v0.5.2).
+- `ask.preview` JSON column read fix.
+
+## [0.5.0] — 2026-04 — Streaming, observability, real SQL parser
+
+- Server-side streaming via SRF: `ask.ask_stream(question)`.
+- `sqlparser` 0.62 (PostgreSQL dialect) for `sql_guard`.
+- `ask._sql_audit` table; `sql_query` and `sample_table` write a
+  row post-execution.
+- Background-worker prototype.
+- Upgrade script `sql/pg_ask--0.4--0.5.sql`.
+
+## [0.4.0] — Tooling expansion, RLS-awareness
+
+- `http_fetch` tool (allow-list gated).
+- `sample_table` lightweight tool.
+- User-defined tools (`ask.register_tool`).
+- RLS-aware schema dump via `has_table_privilege`.
+- Column allow/deny lists (`pg_ask.sensitive_columns`).
+
+## [0.3.0] — Memory, retrieval, token budget
+
+- Token-budget schema rendering (`Full` / `Compact`).
+- `describe_table` tool.
+- pgvector-backed long-term memory (`ask.remember` / `recall` /
+  `forget`).
+- Hybrid search (cosine + BM25-style rerank).
+- Embedding provider abstraction (OpenAI, Voyage, Gemini).
+
+## [0.2.0] — Multi-provider, sessions, preview, audit
+
+- `ask.preview(question)`.
+- `ask._traces` audit table.
+- OpenAI provider (covers every OpenAI-compatible host).
+- Multi-turn sessions (`ask.create_session` / `chat` / `clear_session`).
+- Gemini provider.
+
+## [0.1.0] — Walking skeleton
+
+- `ask.config` / `ask.get_config` / `ask.ask` / `ask.sql` /
+  `ask.version`.
+- Schema introspection from `pg_catalog`.
+- `sql_query` tool via SPI (readonly mode).
+- Anthropic provider.
+- `sql_guard` (token-based; parser landed in v0.5).
+- `SET LOCAL statement_timeout` + `transaction_read_only` around
+  every tool call.
+- Layered config (GUC → table fallback).

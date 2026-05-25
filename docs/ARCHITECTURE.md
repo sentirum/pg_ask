@@ -108,8 +108,10 @@ src/
     mod.rs                   # validate(sql, mode) -> Result<ValidatedSql>
     lexer.rs                 # tokenization (fallback + denylist)
     rules.rs                 # SELECT-only, deny-list, multi-statement check
-    # v0.5: sqlparser (PostgreSQL dialect) handles statement-type
-    # classification; lexer kept for non-standard syntax and function denylist.
+    # v0.5: sqlparser (PostgreSQL dialect) classifies statement types.
+    # v0.5.2: parser-authoritative — lexer fallback runs only on parse
+    # errors; AST walkers handle CTEs / EXPLAIN bodies / function
+    # denylist directly. (Wave 1 C1, H10)
   schema/
     mod.rs                   # summarize_within(budget) -> (text, mode)
     introspect.rs            # pg_catalog queries (full / per-table / table comments)
@@ -122,18 +124,36 @@ src/
     mod.rs                   # TraceRecord + writer; no-op if _traces missing
   infra/
     mod.rs
-    config.rs                # GUC + table layered lookup
-    http.rs                  # shared ureq::Agent factory with timeouts
+    config.rs                # GUC + table layered lookup; clamp_pos helpers
+    http.rs                  # process-level pool of ureq::Agents keyed
+                             # on (connect_timeout, total_timeout) (P4)
     errors.rs                # AskError + From impls
     spi.rs                   # tiny SPI helpers (single_text, exec_unit, ...)
+    subtxn.rs                # v0.5.2 H2: safe wrapper around Postgres
+                             # BeginInternalSubTransaction / Release… /
+                             # RollbackAndRelease…. The single module
+                             # in the project permitted to use raw
+                             # pgrx_pg_sys FFI — see header for the
+                             # whole-program invariants reviewers must
+                             # preserve.
 sql/
-  bootstrap.sql              # schemas, _config, _sessions, _messages, _traces, _tools, _sql_audit
+  bootstrap.sql              # schemas, _config, _sessions, _messages,
+                             # _traces, _tools, _sql_audit (latency_ms),
+                             # SECURITY DEFINER writer helpers, grants
+  finalize.sql               # post-pgrx GRANT/REVOKE on the #[pg_extern]
+                             # config surface (C6 lockdown lives here
+                             # because pgrx emits the function definitions
+                             # *after* bootstrap.sql runs)
   pg_ask--0.4--0.5.sql       # upgrade script (v0.5)
   pg_ask--0.5--0.5.1.sql     # upgrade: rename install schema pg_ask → ask
+  pg_ask--0.5.1--0.5.2.sql   # upgrade: _sql_audit.latency_ms +
+                             # SECURITY DEFINER writer helpers + grants
 docs/
   ARCHITECTURE.md
   SECURITY.md
   ROADMAP.md
+CHANGELOG.md                 # release-by-release diff
+LICENSE                      # PostgreSQL License
 ```
 
 The v0.1 codebase will land on this layout in the refactor that accompanies
@@ -163,38 +183,84 @@ SQL caller
 api::ask::ask(question)
    │
    ▼
-agent::loop::run_agent(question, mode=Execute)
+with_trace("ask", question, |cfg| …)       ← P1: RuntimeConfig
+   │                                            loaded exactly once,
+   │                                            threaded through the loop
+   ▼
+agent::run_with_cfg(question, mode=Execute, &cfg)
    │
-   ├─ infra::config::snapshot()           ← reads GUC → table fallback
-   │      => RuntimeConfig { provider, model, readonly, max_iter, timeouts… }
-   │
-   ├─ schema::summarize(budget)
+   ├─ schema::summarize_within(cfg.schema_char_budget)
+   │      ← P2: thread_local Cell, 60 s TTL keyed by char_budget;
+   │         a 500-table schema warms once per backend.
    │      => SchemaSummary (compact text + token estimate)
    │
-   ├─ agent::prompt::build_system_prompt(&summary, mode, readonly)
+   ├─ agent::prompt::build_system_prompt(&summary, mode, cfg.readonly)
    │
-   ├─ providers::factory(&runtime)        ← Box<dyn Provider>
+   ├─ providers::factory(&cfg)             ← Box<dyn Provider>;
+   │                                          shares the process-wide
+   │                                          HttpClient pool (P4).
    │
-   ├─ tools::default_toolset(readonly)    ← Vec<Box<dyn Tool>>
+   ├─ tools::default_toolset(&cfg)         ← Vec<Box<dyn Tool>>;
+   │                                          recall tool added when
+   │                                          pgvector is detected (P3).
    │
-   ├─ loop iteration 0..max_iter:
+   ├─ loop iteration 0..cfg.max_iterations:
    │      check_for_interrupts!()
-   │      provider.complete(system, history, specs)
+   │      provider.complete(system, history, specs)    ← HTTP only,
+   │                                                     no SPI scope held.
    │      match response:
-   │         Final  → write trace, return
+   │         Final  → break, write trace, return
    │         Tools  → for each call:
-   │                     sql_guard::validate(...)        ← if sql_query
-   │                     tool.invoke(args)
+   │                     sql_guard::validate(...)       ← if sql_query
+   │                     subtxn::run_in_subtransaction(…) {
+   │                         SET LOCAL statement_timeout
+   │                         SET LOCAL transaction_read_only = on  (if readonly)
+   │                         tool.invoke(args)
+   │                     }                              ← H2: failure
+   │                                                     contained;
+   │                                                     parent txn safe.
    │                     append tool_result to history
    │
-   └─ telemetry::write(TraceRecord { … })  ← single insert, best-effort
+   └─ telemetry::write(payload jsonb)      ← P5: single SECURITY DEFINER
+                                              INSERT via ask._write_trace.
 ```
 
 The loop holds **no Postgres pointers across an HTTP call**. Schema
-introspection, tool execution, and trace writes each take a fresh `Spi::connect`
-scope. HTTP happens outside any SPI scope. This is enforced by the
-`run_agent` shape — there is no place to leak a tuple table into an HTTP
-future.
+introspection, tool execution, and trace writes each take a fresh
+`Spi::connect` scope. HTTP happens outside any SPI scope. This is
+enforced by the `run_agent` shape — there is no place to leak a tuple
+table into an HTTP future.
+
+### Subtransaction isolation (v0.5.2 H2)
+
+The inner `subtxn::run_in_subtransaction(name, body)` wrapper is the
+critical guard: a model-emitted statement that fails (typo, missing
+column, permission denied, `statement_timeout`, divide-by-zero, …)
+used to abort the parent transaction and poison every subsequent SPI
+call in the loop with `current transaction is aborted, commands
+ignored`. Now the failure is contained inside the subtxn; the tool
+returns `is_error` to the model, the loop keeps going, and
+`audit_finish` runs normally.
+
+The wrapper mirrors plpython's `PLy_spi_subtransaction_{begin,
+commit,abort}`: snapshot `CurrentMemoryContext` and
+`CurrentResourceOwner` on entry, call
+`BeginInternalSubTransaction`, run the body inside a pgrx
+`PgTryBuilder` (which flushes `ErrorState` automatically on catch),
+then `Release` on Ok / `RollbackAndRelease` on Err, restoring the
+memory context and resource owner on every exit path. `src/infra/
+subtxn.rs` is the **single module** in the project permitted to use
+raw `pgrx_pg_sys` FFI; every `unsafe` block carries a per-call
+`SAFETY` comment.
+
+A secondary use of the wrapper, added in the v0.5.2 critical fix,
+is to scope the per-call `SET LOCAL statement_timeout` /
+`transaction_read_only` GUCs. `SET LOCAL` is scoped to the
+enclosing *transaction*, not the SPI block; before the fix, the
+readonly flag survived the tool call and broke every subsequent
+INSERT (trace row, session turn, the next tool's audit insert).
+Running the SET LOCALs inside a subtxn means Postgres pops the GUC
+stack frame when the subtxn releases.
 
 ## Configuration model
 
@@ -240,8 +306,15 @@ Known keys:
 | `pg_ask.http_allow_list`         | text    | (empty = deny all)   | GUC → table     |
 | `pg_ask.sensitive_columns`       | text    | (empty = none)       | GUC → table     |
 
+All integer GUCs go through `clamp_pos` / `clamp_pos_u64` on read
+(`src/infra/config.rs`), with a floor like `.max(1)` / `.max(512)`
+on the cast site — a malicious `SET pg_ask.tool_max_rows = -500`
+cannot round-trip through as a huge `usize`.
+
 API keys are marked with `GucFlags::SUPERUSER_ONLY | NO_SHOW_ALL` so
-`SHOW ALL` and `pg_settings` don't leak them to ordinary roles.
+`SHOW ALL` and `pg_settings` don't leak them to ordinary roles, and
+`ask.get_config('api_key')` / `ask.get_config('embedding_api_key')`
+return `<redacted>` regardless of caller role (v0.5.2 C3).
 
 ## Trait contracts
 
@@ -292,15 +365,23 @@ PostgreSQL `ERROR` is at the `#[pg_extern]` boundary in `src/api/*`, via
 
 ## Function volatility & parallelism
 
-| Function              | Volatility | Parallel            |
-|-----------------------|------------|---------------------|
-| `ask.version()`       | IMMUTABLE  | parallel_safe       |
-| `ask.get_config(key)` | STABLE     | parallel_restricted |
-| `ask.config(k,v)`     | VOLATILE   | parallel_unsafe     |
-| `ask.ask(q)`          | VOLATILE   | parallel_unsafe     |
-| `ask.sql(q)`          | VOLATILE   | parallel_unsafe     |
-| `ask.preview(q)`      | VOLATILE   | parallel_unsafe     |
-| `ask.chat(s,m)`       | VOLATILE   | parallel_unsafe     |
+| Function                  | Volatility | Parallel            |
+|---------------------------|------------|---------------------|
+| `ask.version()`           | IMMUTABLE  | parallel_safe       |
+| `ask.get_config(key)`     | STABLE     | parallel_restricted |
+| `ask.config(k,v)`         | VOLATILE   | parallel_unsafe     |
+| `ask.ask(q)`              | VOLATILE   | parallel_unsafe     |
+| `ask.sql(q)`              | VOLATILE   | parallel_unsafe     |
+| `ask.preview(q)`          | VOLATILE   | parallel_unsafe     |
+| `ask.chat(s,m)`           | VOLATILE   | parallel_unsafe     |
+| `ask.ask_stream(q)`       | VOLATILE   | parallel_unsafe     |
+| `ask.create_session(l)`   | VOLATILE   | parallel_unsafe     |
+| `ask.clear_session(s)`    | VOLATILE   | parallel_unsafe     |
+| `ask.remember(…)`         | VOLATILE   | parallel_unsafe     |
+| `ask.recall(…)`           | VOLATILE   | parallel_unsafe     |
+| `ask.forget(id)`          | VOLATILE   | parallel_unsafe     |
+| `ask.register_tool(…)`    | VOLATILE   | parallel_unsafe     |
+| `ask.unregister_tool(n)`  | VOLATILE   | parallel_unsafe     |
 
 Every function that performs HTTP or writes is `volatile + parallel_unsafe`.
 The pgrx attribute is mandatory in the macro call so the generated SQL
@@ -308,13 +389,30 @@ matches.
 
 ## Test strategy
 
-- **Unit tests (Rust)** for `sql_guard`, prompt builder, response parser.
-  No PG needed.
-- **`#[pg_test]` integration tests** for SPI helpers, schema introspection,
-  config layering, tool dispatch, and full `ask()` against a recorded HTTP
-  fixture (provider stub).
-- **Recorded HTTP fixtures** live in `tests/fixtures/` and are replayed by
-  a `Provider` impl that wraps a JSON file. No live network in CI.
+- **Unit tests (Rust)** for `sql_guard`, prompt builder, response
+  parser, telemetry helpers (`truncate_tool_output` boundary +
+  UTF-8 char-boundary regression). No PG needed.
+- **`#[pg_test]` integration tests** for SPI helpers, schema
+  introspection, config layering, tool dispatch, subtxn isolation
+  (`subtxn_commits_side_effects_on_ok`,
+  `subtxn_rolls_back_and_keeps_outer_usable_on_postgres_error`,
+  `sql_query_failure_does_not_poison_outer_transaction`,
+  `readonly_ask_does_not_leak_transaction_read_only`), and full
+  `ask()` runs against a recorded HTTP fixture (provider stub).
+- **Recorded HTTP fixtures** live in `tests/fixtures/` and are
+  replayed by `providers::fixture` when `provider = 'fixture'` and
+  `model = 'fixture:<scenario>'`. No live network in CI.
+- **End-to-end manual smoke tests** against live providers
+  (DeepInfra / ZAI Anthropic + GLM-5.1) on a real PG18 backend
+  caught two bugs the unit suite missed:
+      - the `SET LOCAL transaction_read_only` leak that triggered
+        the v0.5.2 critical fix;
+      - the `[tool] {} → {}` stream-truncation issue (review #11).
+  Live smoke is therefore a recommended pre-release gate, not just
+  `cargo test`.
 
-See `docs/ROADMAP.md` for milestone-by-milestone feature plan and
-`docs/SECURITY.md` for the threat model and hardening checklist.
+As of v0.5.2: 75/75 tests green.
+
+See [`../CHANGELOG.md`](../CHANGELOG.md) for the release-by-release
+diff, `docs/ROADMAP.md` for the milestone-by-milestone feature plan,
+and `docs/SECURITY.md` for the threat model and hardening checklist.

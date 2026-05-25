@@ -7,22 +7,25 @@ in v0.1, and the hardening checklist for production deployments.
 
 ## Threat model
 
-| Threat                                              | Mitigation in v0.1                    |
+| Threat                                              | Mitigation (release introduced)        |
 |-----------------------------------------------------|----------------------------------------|
-| Model writes data (INSERT/UPDATE/DELETE/DROP/…)     | `readonly = true` default; SQL guard rejects non-SELECT |
-| Model reads sensitive data via SELECT               | Runs as caller (`SECURITY INVOKER`); RLS + GRANTs enforced |
-| Model bypasses guard via multi-statement payload    | Guard rejects `;` in non-trailing position |
-| Model calls `pg_sleep`, `pg_read_file`, `dblink`, … | Function denylist in guard            |
-| Model uses `COPY ... TO/FROM`                       | Denylisted; also rejected by readonly mode |
-| Long-running model query holds locks                | `SET LOCAL statement_timeout` per tool call |
-| Provider HTTP hang holds backend                    | Shared `ureq::Agent` with connect + total timeouts |
-| API keys exposed in `pg_settings` / dumps           | GUC marked `SUPERUSER_ONLY | NO_SHOW_ALL`; table fallback `REVOKE ALL FROM PUBLIC` |
-| Cross-tenant session theft (v0.2)                   | `_sessions.owner = current_user` check on every chat() call |
-| Prompt injection through data ("ignore previous…")  | Tool output framed as quoted block; system prompt is authoritative; readonly limits blast radius |
-| Backend panic crashes Postgres                      | All Rust `Result`s funnel to `pgrx::error!`; no `catch_unwind` over SPI |
-| Model reads sensitive column (password, SSN, token) | `pg_ask.sensitive_columns` redacts matching cells to `<redacted>` (v0.4) |
-| Model calls arbitrary external URLs                 | `pg_ask.allow_http = false` default + URL prefix allow-list (v0.4) |
-| Malicious user-defined tool exfiltrates data        | `ask._tools` owner-scoped; only the creator (or superuser) can delete (v0.4) |
+| Model writes data (INSERT/UPDATE/DELETE/DROP/…)     | `readonly = true` default; SQL guard rejects non-SELECT; per-call `SET LOCAL transaction_read_only = on` scoped inside an internal subtxn (v0.5.2). |
+| Model reads sensitive data via SELECT               | Runs as caller (`SECURITY INVOKER`); RLS + GRANTs enforced. |
+| Model bypasses guard via multi-statement payload    | `sqlparser` 0.62 walk classifies statements; lexer fallback rejects `;` in non-trailing position (v0.5). |
+| Model calls `pg_sleep`, `pg_read_file`, `dblink`, … | Function denylist (AST walker + lexer). |
+| Model uses `COPY ... TO/FROM`                       | Denylisted; also rejected by readonly mode. |
+| Long-running model query holds locks                | `SET LOCAL statement_timeout` per tool call. |
+| Provider HTTP hang holds backend                    | Shared `ureq::Agent` with connect + total timeouts; process-level pool (v0.5.2). |
+| API keys exposed in `pg_settings` / dumps           | GUC marked `SUPERUSER_ONLY | NO_SHOW_ALL`; `ask.get_config('api_key')` returns `<redacted>`; table fallback `REVOKE ALL FROM PUBLIC` (v0.5.2). |
+| Cross-tenant session / memory / tool theft          | `_sessions.owner = current_user` (v0.2); same predicate on `_memories` (v0.3) and `_tools` (v0.4). All writes through `SECURITY DEFINER` helpers that pin `session_user` (v0.5.2). |
+| Prompt injection through data ("ignore previous…")  | Tool output framed as quoted block; system prompt is authoritative; readonly limits blast radius. |
+| Backend panic crashes Postgres                      | All Rust `Result`s funnel to `pgrx::error!`; no `catch_unwind` over SPI; raw FFI confined to `src/infra/subtxn.rs`. |
+| One tool failure poisons the agent loop             | `tools::sql_query` runs the model-emitted statement inside an internal subtxn (v0.5.2 H2). Errors return `is_error` to the model; the parent txn stays usable. |
+| Stale `transaction_read_only` leaks into trace write | Per-call `SET LOCAL`s live inside the subtxn; releasing the subtxn pops the GUC stack frame (v0.5.2 critical fix). |
+| Model reads sensitive column (password, SSN, token) | `pg_ask.sensitive_columns` redacts matching cells to `<redacted>` (v0.4). |
+| Model fetches arbitrary external URLs (SSRF)        | `pg_ask.allow_http = false` default + URL-parser host-equality allow-list + IPv4/IPv6 private/loopback/link-local/CGNAT CIDR rejection before connect (v0.5.2 C5). |
+| Malicious user-defined tool exfiltrates data        | `ask._tools` owner-scoped; only creator (or superuser) can delete; `{{key}}` placeholders compiled to `$N` parameters at registration (v0.5.2 C4). |
+| Streamed tool output exceeds libpq reply buffer     | `telemetry::truncate_tool_output(…, TOOL_OUTPUT_PREVIEW_CHARS=2000)` shared by `ask.ask_stream` and the trace row writer (v0.5.2 review #11). |
 
 ## Defence in depth
 
@@ -51,13 +54,19 @@ enforced by Postgres itself, not by string matching.
 ### Layer 3 — SQL guard
 
 `src/sql_guard/` validates every string the model wants to execute.
-Rules in v0.1:
+Since v0.5 the guard is **parser-authoritative**: the `sqlparser`
+0.62 walk (PostgreSQL dialect) classifies statement types, walks
+the AST for banned functions, and handles CTEs / EXPLAIN bodies
+properly. The lexer fallback is engaged only when `sqlparser`
+returns a parse error (non-standard syntax); when both fire, the
+strictest verdict wins. Rules as of v0.5.2:
 
-1. Must start with `SELECT`, `WITH`, `TABLE`, or `EXPLAIN` (case-insensitive,
-   ignoring leading whitespace and comments).
-2. May contain at most one statement. A `;` followed by any non-whitespace,
+1. Must be a single `SELECT`/`WITH`/`TABLE` statement. `EXPLAIN`
+   is allowed only when the inner statement itself passes the same
+   check (v0.5.2 H10 closed the `EXPLAIN INSERT …` bypass).
+2. Multi-statement rejection. A `;` followed by any non-whitespace,
    non-comment token is a hard reject.
-3. Must not contain (case-insensitive token match) any banned function:
+3. Function denylist (case-insensitive token match + AST walker):
 
    ```
    pg_sleep, pg_read_file, pg_read_binary_file, pg_ls_dir, pg_stat_file,
@@ -67,27 +76,83 @@ Rules in v0.1:
    set_config, pg_read_server_files
    ```
 
-4. Must not contain `COPY ` at the start of any statement (covers
+4. `COPY` rejected at the start of any statement (covers
    `COPY ... FROM PROGRAM`).
 
-The guard is intentionally token-based, not parser-based. A real parser is
-v0.5 work; until then, the guard is **one layer**, never the only layer.
+The guard is **one layer**, never the only layer. Defence below it
+(readonly txn, subtxn isolation, SPI grants, RLS) catches the cases
+it doesn't.
 
-### Layer 4 — Resource limits
+### Layer 4 — Resource limits + subtxn isolation
 
-Per tool call:
+Per tool call (`sql_query`, `sample_table`, `planner::explain`):
 
-- `SET LOCAL statement_timeout = pg_ask.tool_statement_timeout_ms` (default 10s)
-- `LIMIT` not auto-injected (parser-fragile); instead, hard row cap at
-  `pg_ask.tool_max_rows` (default 200) — extra rows dropped before they
-  reach the model.
-- Per cell cap at 500 characters.
+- A fresh internal subtransaction wraps the model-emitted statement.
+  The per-call `SET LOCAL statement_timeout` and
+  `SET LOCAL transaction_read_only = on` are issued **inside** the
+  subtxn so the GUC stack frame pops cleanly when the subtxn
+  releases; the parent transaction never sees a stale flag.
+- `SET LOCAL statement_timeout = pg_ask.tool_statement_timeout_ms`
+  (default 10s).
+- `LIMIT` not auto-injected (parser-fragile); instead, hard row cap
+  at `pg_ask.tool_max_rows` (default 200) — extra rows dropped
+  before they reach the model.
+- Per-cell cap at 500 characters.
+- Tool output exposed to the streaming surface and the persisted
+  trace row is truncated to `TOOL_OUTPUT_PREVIEW_CHARS = 2000`
+  characters with UTF-8 char-boundary safety. The model itself
+  receives the full output via `history` so its next reasoning step
+  has complete information.
+
+Subtxn isolation (`src/infra/subtxn.rs`) is the single module
+permitted to use raw `pgrx_pg_sys` FFI. It wraps Postgres's
+`BeginInternalSubTransaction` / `Release…` /
+`RollbackAndRelease…` inside a safe
+`run_in_subtransaction(name, body)` helper. A failed model query
+(typo, missing column, permission denied, statement_timeout,
+divide-by-zero, …) no longer aborts the parent transaction and no
+longer poisons the agent loop with
+`current transaction is aborted, commands ignored`; the tool
+returns `is_error` to the model, the loop keeps going,
+`audit_finish` runs normally.
+
+Known limitation: `transaction_read_only` is a transaction-wide
+flag and even a subtxn cannot flip it back off mid-transaction
+(`guc.c::check_transaction_read_only` rejects with
+`ERRCODE_ACTIVE_SQL_TRANSACTION`). Audit row `latency_ms` therefore
+stays NULL under readonly until v0.6 introduces a dblink / bgworker
+/ autonomous-tx based writer.
 
 Per agent run:
 
 - `pg_ask.max_iterations` ceiling (default 16). Stops runaway tool loops.
 - `pg_ask.http_total_timeout_ms` per provider call (default 120s).
 - `check_for_interrupts!()` every iteration; `pg_cancel_backend` works.
+
+### Layer 4b — Internal-table write isolation (v0.5.2)
+
+All internal tables — `_config`, `_sessions`, `_messages`,
+`_memories`, `_tools`, `_sql_audit`, `_traces` — are
+`REVOKE ALL FROM PUBLIC`. Reads are exposed only where they're part
+of the documented contract (`_traces`, `_tools`, `_sql_audit`,
+`_memories` get `GRANT SELECT TO PUBLIC`; the per-row predicate
+`WHERE caller / owner = current_user` is in the SQL itself, not
+left to the Rust caller). Writes go strictly through
+`SECURITY DEFINER` helpers:
+
+- `ask._write_trace(payload jsonb)`
+- `ask._sql_audit_insert(query, row_count, readonly, tool_name)`
+- `ask._sql_audit_finish(id, latency_ms, error)`
+- `ask._memory_insert(content, namespace, metadata, embedding)`
+- `ask._memory_delete_owned(id)`
+- `ask._tool_register(name, spec, body)`
+- `ask._tool_unregister(name)`
+
+Each helper pins `search_path = pg_catalog` (memory helpers also
+include `ask` because they touch `ask._memories` directly) and
+enforces `session_user` ownership inside the body. A single missed
+`WHERE owner = current_user` predicate in Rust can no longer leak
+rows across roles — the SQL itself refuses.
 
 ### Layer 5 — Secrets handling
 
@@ -198,21 +263,36 @@ per-session with `SET LOCAL pg_ask.trace_enabled = off;`.
 - [ ] Set `pg_ask.api_key` via `ALTER ROLE` or `SET LOCAL`. Drop the row
       from `ask._config`.
 - [ ] `REVOKE EXECUTE ON FUNCTION ask.ask(text), ask.sql(text),
-      ask.preview(text), ask.chat(uuid, text) FROM PUBLIC`.
+      ask.preview(text), ask.chat(uuid, text), ask.ask_stream(text)
+      FROM PUBLIC`.
 - [ ] Grant `EXECUTE` only to the roles that should ask.
 - [ ] Keep `pg_ask.readonly = true`.
 - [ ] Set `pg_ask.tool_statement_timeout_ms` to your normal interactive
       ceiling (e.g. 5000).
-- [ ] If you don't need network tools (v0.4), keep `pg_ask.allow_http =
-      false`.
+- [ ] If you don't need network tools, keep `pg_ask.allow_http = false`.
+      When you do enable it, narrow `pg_ask.http_allow_list` to specific
+      hostnames (host equality, not prefix).
 - [ ] Set `pg_ask.sensitive_columns` to redact known-sensitive columns
       (e.g. `users.password, orders.cvv`).
 - [ ] Audit `ask._tools` periodically — user-defined tools execute raw
-      SQL and bypass the sql_guard.
-- [ ] Monitor `ask._traces` (v0.2) — unusual question rate, repeated
-      tool errors, or large row counts are early signals of abuse.
+      SQL (with `{{key}}` placeholders compiled to `$N` parameters) and
+      bypass the sql_guard.
+- [ ] Monitor `ask._traces` and `ask._sql_audit` — unusual question
+      rate, repeated `is_error` tool calls, large row counts, or
+      rows stuck at `row_count = -1` (in-flight) are early signals of
+      abuse or backend instability.
 - [ ] Run the extension owner as a non-superuser role with the minimum
-      grants it needs.
+      grants it needs. The SECURITY DEFINER helpers run as the
+      extension owner, so the privilege boundary is the owner role,
+      not the calling role.
+- [ ] After upgrading from 0.5.0/0.5.1, verify that the writer helpers
+      and their grants are present:
+
+      ```sql
+      \df+ ask._write_trace ask._sql_audit_insert ask._sql_audit_finish \
+           ask._memory_insert ask._memory_delete_owned \
+           ask._tool_register ask._tool_unregister
+      ```
 
 ## What we explicitly do not promise
 

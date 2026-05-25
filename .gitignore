@@ -5,7 +5,12 @@ Cargo.lock.bak
 
 # pgrx
 /.cargo/config
+# pgrx auto-emits its own upgrade scripts at build time; we ignore those
+# wildcard outputs but force-track every handwritten upgrade we ship with
+# the release (each must be added with `git add -f` or be matched by an
+# explicit negation here).
 /sql/pg_ask--*.sql
+!/sql/pg_ask--0.5.1--0.5.2.sql
 /target-*
 
 # Editor
