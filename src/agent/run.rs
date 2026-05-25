@@ -12,8 +12,10 @@ use crate::providers::{
     self, Message, MessageContent, ProviderResponse, Role, ToolSpec,
 };
 use crate::schema;
+use crate::telemetry::ToolCallTrace;
 use crate::tools::{self, Tool};
 use pgrx::prelude::*;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
@@ -23,15 +25,14 @@ pub enum AgentMode {
     GenerateOnly,
 }
 
-/// What the loop produced. Today only `text`; v0.2 adds tool-call trace,
-/// token counts, and timings consumed by [`crate::telemetry`].
+/// What the loop produced. The text is what the SQL caller sees; the
+/// `iterations` and `tool_calls` flow into [`crate::telemetry`] so
+/// `pg_ask._traces` reflects what really happened.
 #[derive(Debug)]
 pub struct AgentOutcome {
     pub text: String,
-    /// Number of provider round-trips it took to converge. Surfaced via
-    /// telemetry (and SQL once `pg_ask._traces` lands in v0.2).
-    #[allow(dead_code)]
     pub iterations: u32,
+    pub tool_calls: Vec<ToolCallTrace>,
 }
 
 pub fn run(question: &str, mode: AgentMode) -> Result<AgentOutcome> {
@@ -52,6 +53,7 @@ pub fn run(question: &str, mode: AgentMode) -> Result<AgentOutcome> {
         role: Role::User,
         content: MessageContent::Text(question.to_string()),
     }];
+    let mut tool_trace: Vec<ToolCallTrace> = Vec::new();
 
     for iteration in 0..cfg.max_iterations {
         // Cooperative cancellation — lets `pg_cancel_backend` interrupt long loops.
@@ -63,6 +65,7 @@ pub fn run(question: &str, mode: AgentMode) -> Result<AgentOutcome> {
                 return Ok(AgentOutcome {
                     text,
                     iterations: iteration + 1,
+                    tool_calls: tool_trace,
                 });
             }
 
@@ -80,7 +83,17 @@ pub fn run(question: &str, mode: AgentMode) -> Result<AgentOutcome> {
                 }
 
                 for call in calls {
+                    let started = Instant::now();
                     let output = dispatch::dispatch(&tools_vec, &call.name, &call.arguments);
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+                    tool_trace.push(ToolCallTrace::from_call(
+                        &call,
+                        &output.text,
+                        output.is_error,
+                        elapsed_ms,
+                    ));
+
                     history.push(Message {
                         role: Role::Tool,
                         content: MessageContent::ToolResult {

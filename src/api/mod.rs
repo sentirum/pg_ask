@@ -12,4 +12,5 @@
 pub mod ask;
 pub mod config;
 pub mod preview;
+pub mod trace;
 pub mod version;

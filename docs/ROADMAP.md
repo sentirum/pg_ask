@@ -39,16 +39,19 @@ The first cut that a careful operator could put in front of a real DB.
 In-progress milestone. Order of attack:
 `preview()` → `_traces` → OpenAI provider → `chat()` + ownership.
 
-- [ ] **`pg_ask.preview(question) → table(generated_sql text, est_rows bigint, tables text[], warnings text[])`**
+- [x] **`pg_ask.preview(question) → table(generated_sql text, est_rows bigint, tables text[], warnings text[])`**
       Produces SQL + `EXPLAIN (FORMAT JSON)` summary without executing the
       query. Strips any leading `EXPLAIN`/`ANALYZE` the model emits so we
       never accidentally execute; runs the EXPLAIN inside a readonly
-      sub-transaction. Postgres-native differentiator.
-- [ ] `pg_ask._traces` audit table — single insert per `ask()` / `chat()` /
-      `preview()`. Writer is `SECURITY DEFINER`. Columns: id, ts, caller, db,
-      question, iterations, tool_calls jsonb, final_text, provider, model,
-      prompt_tokens, completion_tokens, latency_ms, error.
-- [ ] `pg_ask.trace_enabled` GUC honoured by writer (already registered).
+      sub-transaction. Landed in 9c7d07c.
+- [x] `pg_ask._traces` audit table — single insert per `ask()` / `sql()` /
+      `preview()` / `chat()`. Writer `pg_ask._write_trace(jsonb)` is
+      `SECURITY DEFINER` with fixed `search_path`. Columns: id, ts, caller,
+      db, kind, question, iterations, tool_calls jsonb, final_text, provider,
+      model, latency_ms, error. SELECT granted to PUBLIC; writes only via
+      the helper. `token` columns deferred until provider metadata lands.
+- [x] `pg_ask.trace_enabled` GUC honoured by writer; failures `WARNING`
+      only — telemetry can never fail the user's call.
 - [ ] OpenAI provider (works with OpenAI-compatible endpoints: Groq,
       Together, Ollama, vLLM via `base_url`).
 - [ ] Gemini provider.

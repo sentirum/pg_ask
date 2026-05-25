@@ -2,8 +2,14 @@
 //!
 //! Both make network calls and execute SQL; both are explicitly
 //! `volatile` + `parallel_unsafe` so the planner doesn't try to be clever.
+//!
+//! Each call is bracketed by [`crate::api::trace::with_trace`] so every
+//! invocation lands in `pg_ask._traces` with provider, model, iteration
+//! count, tool-call detail, and latency.
 
 use crate::agent::{self, AgentMode};
+use crate::api::trace::with_trace;
+use crate::telemetry::TraceKind;
 use pgrx::prelude::*;
 
 /// Ask the database a natural-language question. The agent reads the schema,
@@ -11,8 +17,15 @@ use pgrx::prelude::*;
 /// a textual answer.
 #[pg_extern(schema = "pg_ask", volatile, parallel_unsafe)]
 fn ask(question: &str) -> String {
-    match agent::run(question, AgentMode::Execute) {
-        Ok(outcome) => outcome.text,
+    let result = with_trace(TraceKind::Ask, question, |rec| {
+        let outcome = agent::run(question, AgentMode::Execute)?;
+        rec.iterations = outcome.iterations;
+        rec.tool_calls = outcome.tool_calls.clone();
+        rec.final_text = Some(outcome.text.clone());
+        Ok(outcome.text)
+    });
+    match result {
+        Ok(text) => text,
         Err(e) => error!("pg_ask.ask: {e}"),
     }
 }
@@ -21,8 +34,15 @@ fn ask(question: &str) -> String {
 /// it sees only the schema and is asked to return a single SQL statement.
 #[pg_extern(schema = "pg_ask", volatile, parallel_unsafe)]
 fn sql(question: &str) -> String {
-    match agent::run(question, AgentMode::GenerateOnly) {
-        Ok(outcome) => outcome.text,
+    let result = with_trace(TraceKind::Sql, question, |rec| {
+        let outcome = agent::run(question, AgentMode::GenerateOnly)?;
+        rec.iterations = outcome.iterations;
+        rec.tool_calls = outcome.tool_calls.clone();
+        rec.final_text = Some(outcome.text.clone());
+        Ok(outcome.text)
+    });
+    match result {
+        Ok(text) => text,
         Err(e) => error!("pg_ask.sql: {e}"),
     }
 }

@@ -106,16 +106,26 @@ The string GUC is registered with `GucFlags::SUPERUSER_ONLY | NO_SHOW_ALL`
 so `SHOW pg_ask.api_key` and `SELECT * FROM pg_settings` redact the value
 for non-superusers.
 
-### Layer 6 — Audit log (v0.2)
+### Layer 6 — Audit log
 
-`pg_ask._traces` records every `ask()` call: caller, db, question,
-generated tool calls, executed SQL, row counts, latency, provider, tokens,
-errors. This is the operator's eye into what the model has been doing and
-what it has been told.
+`pg_ask._traces` records every `ask()` / `sql()` / `preview()` /
+`chat()` call: caller, db, kind, question, generated tool calls
+(arguments + truncated output), iteration count, latency, provider,
+model, error. This is the operator's eye into what the model has
+been doing and what it has been told.
 
-`REVOKE ALL ON pg_ask._traces FROM PUBLIC`; grant `SELECT` to your
-auditing role. Writes happen via a `SECURITY DEFINER` helper so callers
-without `INSERT` rights can still produce trace rows.
+Lockdown is the *opposite* of the other internals — we deliberately
+grant `SELECT` to `PUBLIC` so any logged-in role can audit its own
+activity. The only insert path is `pg_ask._write_trace(jsonb)`, a
+`SECURITY DEFINER` helper that fixes `search_path` and uses
+`gen_random_uuid()` for ids.
+
+Writing happens after every entry-point call regardless of success:
+errors land in the `error` column. The writer is fire-and-forget —
+any failure here becomes a `WARNING` and never fails the user's
+query (telemetry must not break the application). The
+`pg_ask.trace_enabled` GUC (default `on`) lets a caller opt out
+per-session with `SET LOCAL pg_ask.trace_enabled = off;`.
 
 ## Hardening checklist for production
 

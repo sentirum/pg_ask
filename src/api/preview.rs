@@ -16,7 +16,9 @@
 //! The underlying query is never executed.
 
 use crate::agent::{self, AgentMode};
-use crate::planner;
+use crate::api::trace::with_trace;
+use crate::planner::{self, PreviewRow};
+use crate::telemetry::TraceKind;
 use pgrx::prelude::*;
 
 #[pg_extern(schema = "pg_ask", volatile, parallel_unsafe)]
@@ -31,12 +33,19 @@ fn preview(
         name!(warnings, Vec<String>),
     ),
 > {
-    let outcome = match agent::run(question, AgentMode::GenerateOnly) {
-        Ok(o) => o,
-        Err(e) => error!("pg_ask.preview: {e}"),
-    };
+    let result = with_trace(TraceKind::Preview, question, |rec| {
+        let outcome = agent::run(question, AgentMode::GenerateOnly)?;
+        rec.iterations = outcome.iterations;
+        rec.tool_calls = outcome.tool_calls.clone();
+        let row: PreviewRow = planner::preview(&outcome.text)?;
+        // Record the cleaned SQL we actually previewed (post-EXPLAIN-strip),
+        // not the raw model output — that's what operators want to see
+        // when auditing.
+        rec.final_text = Some(row.generated_sql.clone());
+        Ok(row)
+    });
 
-    let row = match planner::preview(&outcome.text) {
+    let row = match result {
         Ok(r) => r,
         Err(e) => error!("pg_ask.preview: {e}"),
     };
