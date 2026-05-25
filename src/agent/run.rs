@@ -19,15 +19,15 @@ use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
-    /// Full loop with tools — used by `pg_ask.ask`.
+    /// Full loop with tools — used by `ask.ask`.
     Execute,
-    /// No tools; ask the model for a single SQL statement — used by `pg_ask.sql`.
+    /// No tools; ask the model for a single SQL statement — used by `ask.sql`.
     GenerateOnly,
 }
 
 /// What the loop produced. The text is what the SQL caller sees; the
 /// `iterations` and `tool_calls` flow into [`crate::telemetry`] so
-/// `pg_ask._traces` reflects what really happened. `new_turns` is the
+/// `ask._traces` reflects what really happened. `new_turns` is the
 /// suffix of history added during this call (initial user message +
 /// assistant turns + tool results) so the session layer can persist
 /// exactly that slice without recomputing.

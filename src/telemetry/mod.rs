@@ -1,4 +1,4 @@
-//! Telemetry / audit log — best-effort writer for `pg_ask._traces`.
+//! Telemetry / audit log — best-effort writer for `ask._traces`.
 //!
 //! One row per public entry-point call (`ask`, `sql`, `preview`, `chat`).
 //! The writer is fire-and-forget from the agent's perspective: a failure
@@ -22,7 +22,7 @@ pub enum TraceKind {
     Ask,
     Sql,
     Preview,
-    /// Used by `pg_ask.chat()` once sessions land later in v0.2.
+    /// Used by `ask.chat()` once sessions land later in v0.2.
     #[allow(dead_code)]
     Chat,
 }
@@ -129,7 +129,7 @@ pub fn write(rec: &TraceRecord) {
     };
 
     let result = Spi::run_with_args(
-        "SELECT pg_ask._write_trace($1::jsonb)",
+        "SELECT ask._write_trace($1::jsonb)",
         &[payload_text.into()],
     );
     if let Err(e) = result {

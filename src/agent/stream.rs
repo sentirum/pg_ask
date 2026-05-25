@@ -1,6 +1,6 @@
 //! Streaming agent entry point.
 //!
-//! `pg_ask.ask_stream(question) RETURNS SETOF text` runs the same agent
+//! `ask.ask_stream(question) RETURNS SETOF text` runs the same agent
 //! loop as `ask()` but yields every assistant turn and tool result as a
 //! separate row. The caller fetches rows one at a time (e.g. `FETCH 1`)
 //! so latency is chunked rather than monolithic.

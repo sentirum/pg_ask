@@ -9,9 +9,9 @@ checkbox is genuinely true on `main`.
 The first cut that a careful operator could put in front of a real DB.
 
 - [x] pgrx 0.18, PG 14–18 build matrix
-- [x] `pg_ask.config(key, value)` / `pg_ask.get_config(key)` (table-backed)
-- [x] `pg_ask.ask(question)` — single-shot agent loop
-- [x] `pg_ask.sql(question)` — generate-only
+- [x] `ask.config(key, value)` / `ask.get_config(key)` (table-backed)
+- [x] `ask.ask(question)` — single-shot agent loop
+- [x] `ask.sql(question)` — generate-only
 - [x] Schema introspection from `pg_catalog`
 - [x] `sql_query` tool via SPI (readonly mode)
 - [x] Anthropic provider
@@ -21,7 +21,7 @@ The first cut that a careful operator could put in front of a real DB.
 - [x] `SET LOCAL statement_timeout` + `transaction_read_only` around every `sql_query` call
 - [x] Shared `ureq::Agent` with connect + total timeouts in `infra::http`
 - [x] Explicit volatility / parallel-safety annotations on every `#[pg_extern]`
-- [x] `pg_ask.version()` (IMMUTABLE)
+- [x] `ask.version()` (IMMUTABLE)
 - [x] GUC registry in `_PG_init`: provider, api_key (SUPERUSER_ONLY), model,
       base_url, max_tokens, max_iterations, readonly, http_connect_timeout_ms,
       http_total_timeout_ms, tool_statement_timeout_ms, tool_max_rows,
@@ -39,13 +39,13 @@ The first cut that a careful operator could put in front of a real DB.
 In-progress milestone. Order of attack:
 `preview()` → `_traces` → OpenAI provider → `chat()` + ownership.
 
-- [x] **`pg_ask.preview(question) → table(generated_sql text, est_rows bigint, tables text[], warnings text[])`**
+- [x] **`ask.preview(question) → table(generated_sql text, est_rows bigint, tables text[], warnings text[])`**
       Produces SQL + `EXPLAIN (FORMAT JSON)` summary without executing the
       query. Strips any leading `EXPLAIN`/`ANALYZE` the model emits so we
       never accidentally execute; runs the EXPLAIN inside a readonly
       sub-transaction. Landed in 9c7d07c.
-- [x] `pg_ask._traces` audit table — single insert per `ask()` / `sql()` /
-      `preview()` / `chat()`. Writer `pg_ask._write_trace(jsonb)` is
+- [x] `ask._traces` audit table — single insert per `ask()` / `sql()` /
+      `preview()` / `chat()`. Writer `ask._write_trace(jsonb)` is
       `SECURITY DEFINER` with fixed `search_path`. Columns: id, ts, caller,
       db, kind, question, iterations, tool_calls jsonb, final_text, provider,
       model, latency_ms, error. SELECT granted to PUBLIC; writes only via
@@ -56,12 +56,12 @@ In-progress milestone. Order of attack:
       (Groq, Together, Mistral, Ollama, vLLM, LM Studio) via `base_url`
       override. Provider aliases recognised: `openai`, `openai-compat`,
       `groq`, `together`, `mistral`, `ollama`, `vllm`, `lmstudio`.
-- [x] Multi-turn sessions backed by `pg_ask._sessions` / `_messages`.
-- [x] `pg_ask.create_session(label)`, `pg_ask.chat(session_id, message)`,
-      `pg_ask.clear_session(session_id)` — ownership-checked on every call.
+- [x] Multi-turn sessions backed by `ask._sessions` / `_messages`.
+- [x] `ask.create_session(label)`, `ask.chat(session_id, message)`,
+      `ask.clear_session(session_id)` — ownership-checked on every call.
       Sessions store assistant turns and tool results so the next turn
       replays the full conversation.
-- [x] `pg_ask._sessions.owner name NOT NULL DEFAULT current_user`. Existence
+- [x] `ask._sessions.owner name NOT NULL DEFAULT current_user`. Existence
       and unauthorized access collapse to the same error so id-space
       probing leaks no information.
 - [x] Gemini provider (generateContent v1beta) — systemInstruction +
@@ -85,9 +85,9 @@ In-progress milestone. Order of attack:
       menu stays tight in the common case.
 - [x] Table-level comments (`pg_description.objsubid = 0`) folded into
       both renderers.
-- [x] pgvector-backed long-term memory: `pg_ask.remember(content, namespace,
-      metadata)`, `pg_ask.recall(query, namespace, limit_n)`,
-      `pg_ask.forget(id)`. Owner-scoped (NotFound==Unauthorized collapse),
+- [x] pgvector-backed long-term memory: `ask.remember(content, namespace,
+      metadata)`, `ask.recall(query, namespace, limit_n)`,
+      `ask.forget(id)`. Owner-scoped (NotFound==Unauthorized collapse),
       namespaces, optional jsonb metadata. Runtime-detected: if pgvector is
       not installed `_memories` is simply skipped at bootstrap and the
       memory.* surface returns an operator-actionable error.
@@ -100,10 +100,10 @@ In-progress milestone. Order of attack:
 - [x] `recall` tool exposed to the agent when pgvector + embedding config
       are present (runtime-detected). Hard cap 25 hits.
 - [ ] Per-row metadata filters (deferred; jsonb is stored, filtering predicate
-      sugar lands with `pg_ask.recall_where(query, filter jsonb)` in v0.4).
+      sugar lands with `ask.recall_where(query, filter jsonb)` in v0.4).
 - [x] Voyage AI native + Google Gemini `batchEmbedContents` embedding
       providers. Aliases `voyage`, `gemini`/`google`.
-- [x] `pg_ask.list_namespaces()` and `pg_ask.list_memories(namespace,
+- [x] `ask.list_namespaces()` and `ask.list_memories(namespace,
       limit_n, offset_n)` admin SRFs — owner-scoped catalog view of
       what is stored, no embedding round-trip.
 
@@ -116,9 +116,9 @@ In-progress milestone. Order of attack:
       the caller can `SELECT` from, with the same timeout / readonly /
       redaction layers as `sql_query`.
 - [x] User-defined tools registered from SQL
-      (`pg_ask.register_tool(name, jsonb_spec, body)`). Body supports
+      (`ask.register_tool(name, jsonb_spec, body)`). Body supports
       `{{key}}` placeholder interpolation from the model's jsonb arguments.
-      Stored in `pg_ask._tools`, owner-scoped (NotFound==Unauthorized collapse
+      Stored in `ask._tools`, owner-scoped (NotFound==Unauthorized collapse
       on delete). Dynamically loaded into the agent toolset every turn.
 - [x] **RLS-aware schema dump**: `has_table_privilege(c.oid, 'SELECT')`
       filter added to global introspection queries so invisible tables
@@ -130,14 +130,14 @@ In-progress milestone. Order of attack:
 
 ## v0.5 — Streaming, observability, hardening
 
-- [x] Server-side streaming via SRF (`SETOF text`) — `pg_ask.ask_stream(question)`.
+- [x] Server-side streaming via SRF (`SETOF text`) — `ask.ask_stream(question)`.
       Yields `[thinking]`, `[tool]`, and `[answer]` rows so the client can
       `FETCH 1` repeatedly instead of blocking for the full loop.
 - [x] Real SQL parser for `sql_guard` — `sqlparser` 0.62 with PostgreSQL dialect
       now classifies statement types (SELECT, WITH, EXPLAIN, COPY, INSERT, …).
       The token-based lexer is kept as fallback for non-standard syntax and
       for the function-denylist check.
-- [x] Audit hooks for SQL the agent runs — `pg_ask._sql_audit` table.
+- [x] Audit hooks for SQL the agent runs — `ask._sql_audit` table.
       `sql_query` and `sample_table` tools write a row post-execution with
       the query text, rendered row count, readonly flag, and tool name.
 - [ ] Real Claude / GPT / Gemini integration tests against recorded fixtures.
@@ -145,10 +145,20 @@ In-progress milestone. Order of attack:
       `fixture` alias that replays JSON files from `tests/fixtures/`.
 - [x] Background-worker prototype — `pg_ask worker` registered via
       `BackgroundWorkerBuilder` when loaded through `shared_preload_libraries`.
-      v0.5 stub heartbeat only; v0.6 will poll `pg_ask._jobs` and run the
+      v0.5 stub heartbeat only; v0.6 will poll `ask._jobs` and run the
       agent loop asynchronously.
 - [x] Upgrade-script policy documented; `sql/pg_ask--0.4--0.5.sql` ships.
       New `_sql_audit` table, `_tools.updated_at` backfill, grant re-apply.
+
+## v0.5.1 — Schema rename (`pg_ask` → `ask`)
+
+- [x] Install schema renamed from `pg_ask` to `ask`. Functions and
+      tables are now addressed as `ask.ask(…)`, `ask._traces`, etc.
+      GUC keys keep the `pg_ask.*` prefix because Postgres binds them
+      to the extension name, not the install schema.
+- [x] In-place upgrade via `sql/pg_ask--0.5--0.5.1.sql`
+      (`ALTER SCHEMA pg_ask RENAME TO ask`). Refuses to run if a schema
+      called `ask` already exists.
 
 ## Non-goals (for now)
 

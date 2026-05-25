@@ -33,11 +33,11 @@ pub fn insert_session(label: Option<&str>) -> Result<Uuid> {
     // side, which would need an extra dependency.
     let id: Option<Uuid> = if let Some(l) = label {
         Spi::get_one_with_args(
-            "INSERT INTO pg_ask._sessions(label) VALUES ($1) RETURNING id",
+            "INSERT INTO ask._sessions(label) VALUES ($1) RETURNING id",
             &[l.into()],
         )?
     } else {
-        Spi::get_one("INSERT INTO pg_ask._sessions DEFAULT VALUES RETURNING id")?
+        Spi::get_one("INSERT INTO ask._sessions DEFAULT VALUES RETURNING id")?
     };
     id.ok_or_else(|| AskError::Sql("INSERT INTO _sessions returned no id".into()))
 }
@@ -45,7 +45,7 @@ pub fn insert_session(label: Option<&str>) -> Result<Uuid> {
 pub fn is_owned_by_current_user(session_id: Uuid) -> Result<bool> {
     let found: Option<bool> = Spi::get_one_with_args(
         "SELECT TRUE
-           FROM pg_ask._sessions
+           FROM ask._sessions
           WHERE id = $1 AND owner = current_user",
         &[session_id.into()],
     )?;
@@ -58,7 +58,7 @@ pub fn fetch_messages(session_id: Uuid) -> Result<Vec<MessageRow>> {
     Spi::connect(|client| -> Result<()> {
         let rows = client.select(
             "SELECT role, content, tool_calls::text, tool_call_id, is_error
-               FROM pg_ask._messages
+               FROM ask._messages
               WHERE session_id = $1
               ORDER BY idx",
             None,
@@ -113,7 +113,7 @@ pub fn append(session_id: Uuid, messages: &[Message]) -> Result<()> {
         // RETURNING gives us back the row we just wrote so we don't need
         // a second SELECT.
         let next_idx_query =
-            "SELECT COALESCE(MAX(idx), -1) + 1 FROM pg_ask._messages WHERE session_id = $1";
+            "SELECT COALESCE(MAX(idx), -1) + 1 FROM ask._messages WHERE session_id = $1";
 
         let mut next: i32 = client
             .select(next_idx_query, None, &[session_id.into()])?
@@ -135,7 +135,7 @@ pub fn append(session_id: Uuid, messages: &[Message]) -> Result<()> {
             let tc_owned: Option<String> = tool_calls.map(|v| v.to_string());
 
             client.update(
-                "INSERT INTO pg_ask._messages
+                "INSERT INTO ask._messages
                     (session_id, idx, role, content, tool_calls, tool_call_id, is_error)
                  VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)",
                 None,
@@ -154,7 +154,7 @@ pub fn append(session_id: Uuid, messages: &[Message]) -> Result<()> {
 
         // Touch updated_at so listings sort sensibly.
         client.update(
-            "UPDATE pg_ask._sessions SET updated_at = now() WHERE id = $1",
+            "UPDATE ask._sessions SET updated_at = now() WHERE id = $1",
             None,
             &[session_id.into()],
         )?;
@@ -165,7 +165,7 @@ pub fn append(session_id: Uuid, messages: &[Message]) -> Result<()> {
 
 pub fn clear_messages(session_id: Uuid) -> Result<()> {
     Spi::run_with_args(
-        "DELETE FROM pg_ask._messages WHERE session_id = $1",
+        "DELETE FROM ask._messages WHERE session_id = $1",
         &[session_id.into()],
     )?;
     Ok(())

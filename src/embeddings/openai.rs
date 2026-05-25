@@ -91,7 +91,7 @@ impl EmbeddingProvider for OpenAiEmbeddings {
                     key: "embedding_dimensions",
                     message: format!(
                         "model `{}` returned {actual}-D vectors but pg_ask.embedding_dimensions = {} \
-                         — set the GUC to match, or recreate pg_ask._memories with the right width",
+                         — set the GUC to match, or recreate ask._memories with the right width",
                         self.model, self.dimensions
                     ),
                 });

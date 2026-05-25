@@ -44,7 +44,7 @@ WHERE a.attnum > 0
   AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
   AND n.nspname NOT LIKE 'pg\_temp\_%'
   AND n.nspname NOT LIKE 'pg\_toast\_temp\_%'
-  AND NOT (n.nspname = 'pg_ask')                   -- hide our own internals
+  AND NOT (n.nspname = 'ask')                   -- hide our own internals
   AND has_table_privilege(c.oid, 'SELECT')
 ORDER BY schema_name, table_name, a.attnum
 "#;
@@ -84,7 +84,7 @@ WHERE d.objsubid = 0
   AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
   AND n.nspname NOT LIKE 'pg\_temp\_%'
   AND n.nspname NOT LIKE 'pg\_toast\_temp\_%'
-  AND NOT (n.nspname = 'pg_ask')
+  AND NOT (n.nspname = 'ask')
   AND has_table_privilege(c.oid, 'SELECT')
 "#;
 

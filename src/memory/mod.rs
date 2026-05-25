@@ -15,7 +15,7 @@
 //! collapse we use in `session/` so id-space probing leaks nothing.
 //!
 //! Optional layer: if pgvector is not installed (and therefore
-//! `pg_ask._memories` was not created during bootstrap), every entry
+//! `ask._memories` was not created during bootstrap), every entry
 //! point returns a clean error pointing the operator at
 //! `CREATE EXTENSION vector;`.
 

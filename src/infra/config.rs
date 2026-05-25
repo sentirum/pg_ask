@@ -4,7 +4,7 @@
 //!
 //! 1. Session GUC: `SET LOCAL pg_ask.<key> = '…'`
 //! 2. Role / database GUC: `ALTER ROLE x SET pg_ask.<key> = '…'`
-//! 3. Table fallback: `pg_ask._config(key, value)`
+//! 3. Table fallback: `ask._config(key, value)`
 //!
 //! GUCs are registered in `lib.rs::_PG_init`. Strings storing secrets are
 //! flagged `SUPERUSER_ONLY | NO_SHOW_ALL` so `SHOW ALL` / `pg_settings`
@@ -59,7 +59,7 @@ pub static EMBEDDING_BASE_URL: GucSetting<Option<CString>> =
 pub static EMBEDDING_DIMENSIONS: GucSetting<i32> = GucSetting::<i32>::new(1536);
 
 /// Blend weight in [0,1] between cosine similarity and full-text BM25-ish
-/// rank for `pg_ask.recall`. 1.0 = pure vector, 0.0 = pure FTS. Default
+/// rank for `ask.recall`. 1.0 = pure vector, 0.0 = pure FTS. Default
 /// 0.7 leans on the embedding while keeping keyword anchors honest.
 pub static MEMORY_SEARCH_ALPHA: GucSetting<f64> = GucSetting::<f64>::new(0.7);
 
@@ -175,8 +175,8 @@ impl RuntimeConfig {
 
 // ---------- Public API (used by `api/config.rs`) ----------
 
-/// Insert or update a row in `pg_ask._config`. Used by the SQL-callable
-/// `pg_ask.config(key, value)`. Validates the key against the allow-list of
+/// Insert or update a row in `ask._config`. Used by the SQL-callable
+/// `ask.config(key, value)`. Validates the key against the allow-list of
 /// known config keys so typos surface immediately.
 pub fn upsert_table(key: &str, value: &str) -> Result<()> {
     if !is_known_key(key) {
@@ -186,7 +186,7 @@ pub fn upsert_table(key: &str, value: &str) -> Result<()> {
         });
     }
     pgrx::Spi::run_with_args(
-        "INSERT INTO pg_ask._config(key, value) VALUES ($1, $2)
+        "INSERT INTO ask._config(key, value) VALUES ($1, $2)
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
         &[key.into(), value.into()],
     )?;
@@ -194,11 +194,11 @@ pub fn upsert_table(key: &str, value: &str) -> Result<()> {
 }
 
 /// Read a config value from the table fallback only. Used by the SQL-callable
-/// `pg_ask.get_config(key)`; for the agent's own resolution use
+/// `ask.get_config(key)`; for the agent's own resolution use
 /// [`RuntimeConfig::load`].
 pub fn read_table(key: &str) -> Result<Option<String>> {
     spi::select_one_text_with(
-        "SELECT value FROM pg_ask._config WHERE key = $1",
+        "SELECT value FROM ask._config WHERE key = $1",
         &[key.into()],
     )
 }

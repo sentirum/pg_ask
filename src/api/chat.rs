@@ -1,10 +1,10 @@
 //! Multi-turn chat surface.
 //!
 //! ```sql
-//! SELECT pg_ask.create_session('weekly analytics');
-//! SELECT pg_ask.chat(<id>, 'how many orders shipped last week?');
-//! SELECT pg_ask.chat(<id>, 'and the week before?');
-//! SELECT pg_ask.clear_session(<id>);
+//! SELECT ask.create_session('weekly analytics');
+//! SELECT ask.chat(<id>, 'how many orders shipped last week?');
+//! SELECT ask.chat(<id>, 'and the week before?');
+//! SELECT ask.clear_session(<id>);
 //! ```
 //!
 //! Ownership is enforced inside `session::*` — both reads and writes go
@@ -19,17 +19,17 @@ use pgrx::prelude::*;
 use pgrx::Uuid;
 
 /// Create a new conversation. Returns its id.
-#[pg_extern(schema = "pg_ask", volatile, parallel_unsafe)]
+#[pg_extern(schema = "ask", volatile, parallel_unsafe)]
 fn create_session(label: Option<String>) -> Uuid {
     match session::create(label.as_deref()) {
         Ok(id) => id,
-        Err(e) => error!("pg_ask.create_session: {e}"),
+        Err(e) => error!("ask.create_session: {e}"),
     }
 }
 
 /// Append a user message to an existing session, run the agent with the
 /// reconstructed history, persist the new turns, and return the final text.
-#[pg_extern(schema = "pg_ask", volatile, parallel_unsafe)]
+#[pg_extern(schema = "ask", volatile, parallel_unsafe)]
 fn chat(session_id: Uuid, message: &str) -> String {
     let result = with_trace(TraceKind::Chat, message, |rec| {
         let prior = session::load_history(session_id)?;
@@ -47,15 +47,15 @@ fn chat(session_id: Uuid, message: &str) -> String {
     });
     match result {
         Ok(text) => text,
-        Err(e) => error!("pg_ask.chat: {e}"),
+        Err(e) => error!("ask.chat: {e}"),
     }
 }
 
 /// Wipe message history for a session (the session row itself stays).
-#[pg_extern(schema = "pg_ask", volatile, parallel_unsafe)]
+#[pg_extern(schema = "ask", volatile, parallel_unsafe)]
 fn clear_session(session_id: Uuid) -> bool {
     if let Err(e) = session::clear(session_id) {
-        error!("pg_ask.clear_session: {e}");
+        error!("ask.clear_session: {e}");
     }
     true
 }

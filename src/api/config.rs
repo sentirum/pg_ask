@@ -1,6 +1,6 @@
 //! SQL-callable configuration surface.
 //!
-//! Writes go into the `pg_ask._config` table fallback. For session-scoped
+//! Writes go into the `ask._config` table fallback. For session-scoped
 //! or role-scoped configuration use the GUCs directly:
 //!
 //! ```sql
@@ -13,15 +13,15 @@
 use crate::infra::config;
 use pgrx::prelude::*;
 
-/// Persist a config key/value pair in `pg_ask._config`.
+/// Persist a config key/value pair in `ask._config`.
 ///
 /// Marked `SECURITY DEFINER` so the table can be locked down for non-owner
 /// roles; the function validates the key against an allow-list so this
 /// doesn't become a generic write primitive.
-#[pg_extern(schema = "pg_ask", security_definer, volatile, parallel_unsafe)]
+#[pg_extern(schema = "ask", security_definer, volatile, parallel_unsafe)]
 fn config(key: &str, value: &str) -> bool {
     if let Err(e) = config::upsert_table(key, value) {
-        error!("pg_ask.config: {e}");
+        error!("ask.config: {e}");
     }
     true
 }
@@ -30,10 +30,10 @@ fn config(key: &str, value: &str) -> bool {
 ///
 /// Does **not** consult the GUC layer; for GUC values use
 /// `SHOW pg_ask.<key>` from a superuser session.
-#[pg_extern(schema = "pg_ask", stable, parallel_restricted)]
+#[pg_extern(schema = "ask", stable, parallel_restricted)]
 fn get_config(key: &str) -> Option<String> {
     match config::read_table(key) {
         Ok(v) => v,
-        Err(e) => error!("pg_ask.get_config: {e}"),
+        Err(e) => error!("ask.get_config: {e}"),
     }
 }

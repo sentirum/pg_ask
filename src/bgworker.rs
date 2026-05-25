@@ -2,8 +2,8 @@
 //!
 //! Decouples long-running agent work from the calling backend by running
 //! the loop in a separate background worker process. The caller will
-//! eventually submit a question to `pg_ask._jobs` and poll
-//! `pg_ask._job_results` for the answer. This is a stub — the full loop
+//! eventually submit a question to `ask._jobs` and poll
+//! `ask._job_results` for the answer. This is a stub — the full loop
 //! wiring lands in v0.6.
 
 use pgrx::bgworkers::*;
@@ -41,7 +41,7 @@ pub extern "C-unwind" fn pg_ask_worker_main(_arg: pg_sys::Datum) {
         if BackgroundWorker::sighup_received() {
             // In v0.6: reload GUCs / config here.
         }
-        // v0.5 stub: heartbeat only. v0.6 will poll pg_ask._jobs,
+        // v0.5 stub: heartbeat only. v0.6 will poll ask._jobs,
         // run agent::run() against pending rows, and write results back.
         log!("pg_ask worker heartbeat");
     }

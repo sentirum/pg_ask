@@ -70,12 +70,12 @@ src/
   lib.rs                     # _PG_init, pg_module_magic!, module tree, GUC registry
   api/
     mod.rs                   # re-exports
-    ask.rs                   # pg_ask.ask  / pg_ask.sql
-    preview.rs               # pg_ask.preview          (v0.2)
-    chat.rs                  # pg_ask.chat             (v0.2)
-    config.rs                # pg_ask.config / get_config / set_local_config
-    tools.rs                 # pg_ask.register_tool / unregister_tool / list_tools (v0.4)
-    version.rs               # pg_ask.version
+    ask.rs                   # ask.ask  / ask.sql
+    preview.rs               # ask.preview            (v0.2)
+    chat.rs                  # ask.chat               (v0.2)
+    config.rs                # ask.config / get_config / set_local_config
+    tools.rs                 # ask.register_tool / unregister_tool / list_tools (v0.4)
+    version.rs               # ask.version
   agent/
     mod.rs
     loop.rs                  # run_agent(...)
@@ -129,6 +129,7 @@ src/
 sql/
   bootstrap.sql              # schemas, _config, _sessions, _messages, _traces, _tools, _sql_audit
   pg_ask--0.4--0.5.sql       # upgrade script (v0.5)
+  pg_ask--0.5--0.5.1.sql     # upgrade: rename install schema pg_ask → ask
 docs/
   ARCHITECTURE.md
   SECURITY.md
@@ -139,7 +140,21 @@ The v0.1 codebase will land on this layout in the refactor that accompanies
 this document. Nothing here is aspirational — files that don't exist yet are
 called out explicitly with the milestone in which they appear.
 
-## Request lifecycle: `pg_ask.ask(question)`
+## Schema vs. GUC namespace
+
+Since v0.5.1 the extension installs into the `ask` schema (functions,
+tables, indexes). The GUC namespace is still `pg_ask.*` because Postgres
+binds a GUC's first segment to the extension *name*, not its install
+schema. So:
+
+- `SELECT ask.ask('…')`, `SELECT * FROM ask._traces`, etc.
+- `SET pg_ask.provider = 'anthropic'`, `ALTER ROLE x SET pg_ask.api_key = '…'`.
+
+Upgrading from 0.5.0 runs `ALTER SCHEMA pg_ask RENAME TO ask`; existing
+GUC values, RLS policies, and grants follow automatically because the
+namespace OID is unchanged.
+
+## Request lifecycle: `ask.ask(question)`
 
 ```
 SQL caller
@@ -190,7 +205,7 @@ Three sources, checked in order. First hit wins.
 2. **Role / database GUC** — `ALTER ROLE alice SET pg_ask.api_key = '…'` or
    `ALTER DATABASE prod SET pg_ask.api_key = '…'`. Survives reconnects,
    stored in `pg_db_role_setting`, redacted from `pg_settings` for non-owners.
-3. **Table fallback** — `pg_ask._config(key, value)`. Convenient default for
+3. **Table fallback** — `ask._config(key, value)`. Convenient default for
    developers; should be revoked in production and replaced with GUCs.
 
 A `RuntimeConfig` snapshot is produced once at the top of every `ask()`,
@@ -277,15 +292,15 @@ PostgreSQL `ERROR` is at the `#[pg_extern]` boundary in `src/api/*`, via
 
 ## Function volatility & parallelism
 
-| Function           | Volatility | Parallel        |
-|--------------------|------------|-----------------|
-| `pg_ask.version()` | IMMUTABLE  | parallel_safe   |
-| `pg_ask.get_config(key)` | STABLE | parallel_restricted |
-| `pg_ask.config(k,v)` | VOLATILE | parallel_unsafe |
-| `pg_ask.ask(q)`    | VOLATILE   | parallel_unsafe |
-| `pg_ask.sql(q)`    | VOLATILE   | parallel_unsafe |
-| `pg_ask.preview(q)`| VOLATILE   | parallel_unsafe |
-| `pg_ask.chat(s,m)` | VOLATILE   | parallel_unsafe |
+| Function              | Volatility | Parallel            |
+|-----------------------|------------|---------------------|
+| `ask.version()`       | IMMUTABLE  | parallel_safe       |
+| `ask.get_config(key)` | STABLE     | parallel_restricted |
+| `ask.config(k,v)`     | VOLATILE   | parallel_unsafe     |
+| `ask.ask(q)`          | VOLATILE   | parallel_unsafe     |
+| `ask.sql(q)`          | VOLATILE   | parallel_unsafe     |
+| `ask.preview(q)`      | VOLATILE   | parallel_unsafe     |
+| `ask.chat(s,m)`       | VOLATILE   | parallel_unsafe     |
 
 Every function that performs HTTP or writes is `volatile + parallel_unsafe`.
 The pgrx attribute is mandatory in the macro call so the generated SQL

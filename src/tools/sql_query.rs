@@ -126,7 +126,7 @@ fn run_query_to_text(
         // outer transaction. Inside the same transaction these stay in
         // effect for every subsequent statement, including the user's
         // remaining work — that's why we restore them in the cleanup at the
-        // bottom. (Worth noting: in the typical pg_ask.ask() call the only
+        // bottom. (Worth noting: in the typical ask.ask() call the only
         // statement that runs *after* ours is the tool result feed-back,
         // which doesn't hit SPI again, so restoring is belt-and-braces.)
         client
@@ -179,7 +179,7 @@ fn run_query_to_text(
         // Audit hook: log what the model asked us to run.
         let row_count = rows.len() as i32;
         let _ = client.update(
-            "INSERT INTO pg_ask._sql_audit (query, row_count, readonly, tool_name) \
+            "INSERT INTO ask._sql_audit (query, row_count, readonly, tool_name) \
              VALUES ($1, $2, $3, 'sql_query')",
             None,
             &[query.into(), row_count.into(), readonly.into()],

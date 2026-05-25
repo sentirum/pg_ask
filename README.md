@@ -5,19 +5,24 @@ inside the database, reads your schema, plans SQL, executes it via SPI in the
 current transaction, and synthesises an answer.
 
 ```sql
-CREATE EXTENSION pg_ask;
+CREATE EXTENSION pg_ask;  -- installs into schema "ask"
 
-SELECT pg_ask.config('provider', 'anthropic');
-SELECT pg_ask.config('api_key',  'sk-ant-...');
-SELECT pg_ask.config('model',    'claude-sonnet-4-5');
+SELECT ask.config('provider', 'anthropic');
+SELECT ask.config('api_key',  'sk-ant-...');
+SELECT ask.config('model',    'claude-sonnet-4-5');
 
-SELECT pg_ask.ask('How many orders shipped last week?');
+SELECT ask.ask('How many orders shipped last week?');
 -- "127 orders shipped between 2026-05-18 and 2026-05-24."
 
-SELECT pg_ask.sql('top 5 customers by lifetime revenue');
+SELECT ask.sql('top 5 customers by lifetime revenue');
 -- SELECT customer_id, SUM(amount) AS revenue
 -- FROM orders GROUP BY customer_id ORDER BY revenue DESC LIMIT 5;
 ```
+
+> Note: SQL identifiers live in the `ask` schema (since v0.5.1). GUC keys
+> still live under `pg_ask.*` (e.g. `SET pg_ask.provider = '…'`) because
+> Postgres ties a GUC namespace to the extension name, not its install
+> schema.
 
 > **Status:** v0.5 complete — Anthropic + OpenAI + Gemini chat,
 > OpenAI / Voyage / Gemini embeddings, pgvector-backed long-term memory
@@ -38,7 +43,7 @@ generate SQL without executing (`pg_ai_query`), focus on classical ML
 ## Architecture
 
 ```
-SELECT pg_ask.ask('…')
+SELECT ask.ask('…')
         │
         ▼
   ┌─────────────────────────────────┐
@@ -83,9 +88,9 @@ Then in the psql shell:
 
 ```sql
 CREATE EXTENSION pg_ask;
-SELECT pg_ask.config('provider', 'anthropic');
-SELECT pg_ask.config('api_key',  :'anthropic_key');
-SELECT pg_ask.ask('list all tables and their row counts');
+SELECT ask.config('provider', 'anthropic');
+SELECT ask.config('api_key',  :'anthropic_key');
+SELECT ask.ask('list all tables and their row counts');
 ```
 
 ## Configuration
@@ -113,25 +118,25 @@ SET pg_ask.embedding_api_key   = '...';          -- separate from chat key
 SET pg_ask.embedding_model     = 'text-embedding-3-small';
 SET pg_ask.embedding_dimensions = 1536;          -- must match _memories col width
 
-SELECT pg_ask.remember('User prefers concise SQL answers.');
-SELECT * FROM pg_ask.recall('what does the user prefer?');
-SELECT * FROM pg_ask.list_namespaces();
-SELECT * FROM pg_ask.list_memories(namespace := 'analytics', limit_n := 20);
-SELECT pg_ask.forget('uuid-here'::uuid);
+SELECT ask.remember('User prefers concise SQL answers.');
+SELECT * FROM ask.recall('what does the user prefer?');
+SELECT * FROM ask.list_namespaces();
+SELECT * FROM ask.list_memories(namespace := 'analytics', limit_n := 20);
+SELECT ask.forget('uuid-here'::uuid);
 ```
 
 The agent itself is wired up: when memory is configured and pgvector is
-installed, `pg_ask.ask(...)` exposes a `recall` tool to the model so it
+installed, `ask.ask(...)` exposes a `recall` tool to the model so it
 can pull relevant past context into the conversation on its own.
 
 ## Security
 
-API keys are stored in `pg_ask._config`. Grant `USAGE` on the `pg_ask`
+API keys are stored in `ask._config`. Grant `USAGE` on the `ask`
 schema and `EXECUTE` on the public functions only to the roles that should
 be able to ask. Internal tables `REVOKE ALL` from `PUBLIC` by default.
 
 For multi-tenant or untrusted-caller scenarios, run with `readonly = true`
-and gate `pg_ask.ask` behind a `SECURITY DEFINER` wrapper that pins the
+and gate `ask.ask` behind a `SECURITY DEFINER` wrapper that pins the
 search path and any RLS context you need.
 
 ## Docs

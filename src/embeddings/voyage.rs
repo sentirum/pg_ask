@@ -95,7 +95,7 @@ impl EmbeddingProvider for VoyageEmbeddings {
                     message: format!(
                         "voyage model `{}` returned {actual}-D vectors but \
                          pg_ask.embedding_dimensions = {} — set the GUC to match, \
-                         or recreate pg_ask._memories with the right width \
+                         or recreate ask._memories with the right width \
                          (voyage-3 = 1024, voyage-3-large = 1024, voyage-code-3 = 1024)",
                         self.model, self.dimensions
                     ),

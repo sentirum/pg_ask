@@ -1,5 +1,5 @@
 //! User-defined tools — SQL snippets registered by operators via
-//! `pg_ask.register_tool(name, spec, body)`.
+//! `ask.register_tool(name, spec, body)`.
 //!
 //! At invocation time the tool's jsonb arguments are interpolated into
 //! `{{key}}` placeholders in the body string. The resulting SQL is executed

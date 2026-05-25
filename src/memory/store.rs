@@ -13,7 +13,7 @@ use pgrx::prelude::*;
 use pgrx::Uuid;
 use serde_json::Value;
 
-/// One row from `pg_ask.list_memories()` — caller-visible admin view.
+/// One row from `ask.list_memories()` — caller-visible admin view.
 #[derive(Debug, Clone)]
 pub struct MemoryRow {
     pub id: Uuid,
@@ -23,7 +23,7 @@ pub struct MemoryRow {
     pub created_at_iso: String,
 }
 
-/// One row from `pg_ask.list_namespaces()` — namespace + row count.
+/// One row from `ask.list_namespaces()` — namespace + row count.
 #[derive(Debug, Clone)]
 pub struct NamespaceCount {
     pub namespace: String,
@@ -60,7 +60,7 @@ pub fn insert(
     let metadata_text = metadata.to_string();
 
     let id: Option<Uuid> = Spi::get_one_with_args(
-        "INSERT INTO pg_ask._memories
+        "INSERT INTO ask._memories
             (content, namespace, metadata, embedding)
          VALUES ($1, $2, $3::jsonb, $4::vector)
          RETURNING id",
@@ -81,7 +81,7 @@ pub fn list_namespaces() -> Result<Vec<NamespaceCount>> {
     Spi::connect(|client| -> Result<()> {
         let rows = client.select(
             "SELECT namespace, COUNT(*)::bigint AS n
-               FROM pg_ask._memories
+               FROM ask._memories
               WHERE owner = current_user
               GROUP BY namespace
               ORDER BY n DESC, namespace ASC",
@@ -126,7 +126,7 @@ pub fn list_memories(
                metadata::text,
                to_char(created_at AT TIME ZONE 'UTC',
                        'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_iso
-          FROM pg_ask._memories
+          FROM ask._memories
          WHERE owner = current_user
            AND ($1::text IS NULL OR namespace = $1::text)
          ORDER BY created_at DESC
@@ -195,7 +195,7 @@ pub fn delete(id: Uuid) -> Result<bool> {
     // "doesn't exist", which is exactly the NotFound-collapse we want.
     let deleted: Option<bool> = Spi::get_one_with_args(
         "WITH d AS (
-             DELETE FROM pg_ask._memories
+             DELETE FROM ask._memories
               WHERE id = $1 AND owner = current_user
               RETURNING 1
          )
@@ -240,7 +240,7 @@ pub fn hybrid_search(
                    ($3::float8) * (1 - (m.embedding <=> (SELECT vec FROM q)))
                  + (1 - $3::float8) * (1.0 / (1.0 + COALESCE(ts_rank_cd(m.tsv, (SELECT tsq FROM q)), 0)))
                ) AS score
-          FROM pg_ask._memories m
+          FROM ask._memories m
          WHERE m.owner = current_user
            AND m.namespace = $4::text
          ORDER BY score DESC

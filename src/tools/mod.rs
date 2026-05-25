@@ -88,7 +88,7 @@ pub fn default_toolset(
     tools
 }
 
-/// Load user-defined tools from `pg_ask._tools` for the current role.
+/// Load user-defined tools from `ask._tools` for the current role.
 /// Silently returns an empty vec on SPI failure so a broken _tools table
 /// does not crash the agent loop.
 pub fn load_user_tools() -> Result<Vec<user_defined::UserDefinedTool>> {
@@ -96,7 +96,7 @@ pub fn load_user_tools() -> Result<Vec<user_defined::UserDefinedTool>> {
 
     Spi::connect(|client| -> Result<()> {
         let rows = client.select(
-            "SELECT name, spec, body FROM pg_ask._tools WHERE owner = current_user",
+            "SELECT name, spec, body FROM ask._tools WHERE owner = current_user",
             None,
             &[],
         )?;

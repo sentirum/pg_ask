@@ -1,7 +1,7 @@
 //! Multi-turn session storage.
 //!
 //! A session is just a `uuid` + an `owner` + an ordered list of messages.
-//! Persistence lives in `pg_ask._sessions` / `pg_ask._messages` (see
+//! Persistence lives in `ask._sessions` / `ask._messages` (see
 //! `sql/bootstrap.sql`). This module exposes a small set of safe operations;
 //! the SQL surface in `api::chat` consumes them.
 //!

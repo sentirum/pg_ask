@@ -127,7 +127,7 @@ impl EmbeddingProvider for GeminiEmbeddings {
                     message: format!(
                         "gemini model `{}` returned {actual}-D vectors but \
                          pg_ask.embedding_dimensions = {} — set the GUC to match, \
-                         or recreate pg_ask._memories with the right width \
+                         or recreate ask._memories with the right width \
                          (text-embedding-004 = 768)",
                         self.model, self.dimensions
                     ),

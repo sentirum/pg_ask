@@ -22,19 +22,24 @@ in v0.1, and the hardening checklist for production deployments.
 | Backend panic crashes Postgres                      | All Rust `Result`s funnel to `pgrx::error!`; no `catch_unwind` over SPI |
 | Model reads sensitive column (password, SSN, token) | `pg_ask.sensitive_columns` redacts matching cells to `<redacted>` (v0.4) |
 | Model calls arbitrary external URLs                 | `pg_ask.allow_http = false` default + URL prefix allow-list (v0.4) |
-| Malicious user-defined tool exfiltrates data        | `pg_ask._tools` owner-scoped; only the creator (or superuser) can delete (v0.4) |
+| Malicious user-defined tool exfiltrates data        | `ask._tools` owner-scoped; only the creator (or superuser) can delete (v0.4) |
 
 ## Defence in depth
 
 ### Layer 1 — SECURITY INVOKER + Postgres GRANTs
 
-`pg_ask.ask` and friends run as the calling role. Standard Postgres
+`ask.ask` and friends run as the calling role. Standard Postgres
 permissions and Row-Level Security apply unchanged. The agent cannot read
 a table the caller cannot read. This is the **primary** defence; everything
 else is belt-and-braces.
 
-Recommendation: grant `EXECUTE` on `pg_ask.ask` only to roles that should
+Recommendation: grant `EXECUTE` on `ask.ask` only to roles that should
 be able to ask. Revoke from `PUBLIC` by default.
+
+> Naming note: SQL identifiers live in the `ask` schema (since v0.5.1).
+> GUC keys still live under `pg_ask.*` (`SET pg_ask.readonly = on`),
+> because Postgres ties GUC namespaces to the extension name, not its
+> install schema.
 
 ### Layer 2 — Readonly transaction guard
 
@@ -92,7 +97,7 @@ API keys should live in a GUC, not the table. Order of preference:
 
    ```sql
    SET LOCAL pg_ask.api_key = 'sk-ant-…';
-   SELECT pg_ask.ask('…');
+   SELECT ask.ask('…');
    ```
 
 2. **Role-scoped**, persisted in `pg_db_role_setting` (not in your dump):
@@ -101,8 +106,8 @@ API keys should live in a GUC, not the table. Order of preference:
    ALTER ROLE app_reader SET pg_ask.api_key = 'sk-ant-…';
    ```
 
-3. **Table fallback** in `pg_ask._config`. Convenient for dev; in
-   production, `REVOKE ALL ON pg_ask._config FROM PUBLIC` (already in
+3. **Table fallback** in `ask._config`. Convenient for dev; in
+   production, `REVOKE ALL ON ask._config FROM PUBLIC` (already in
    bootstrap) and grant only to a setup role.
 
 The string GUC is registered with `GucFlags::SUPERUSER_ONLY | NO_SHOW_ALL`
@@ -111,14 +116,14 @@ for non-superusers.
 
 ### Layer 5b — Memory ownership (v0.3)
 
-`pg_ask._memories` carries an `owner name NOT NULL DEFAULT current_user`
+`ask._memories` carries an `owner name NOT NULL DEFAULT current_user`
 column. Every read, write, and delete in the memory layer goes through
 `WHERE owner = current_user` — the SQL itself, not just the Rust caller.
 The `recall` tool the agent sees is therefore *automatically scoped to
-the role that invoked `pg_ask.ask`*; a session as role A cannot leak
+the role that invoked `ask.ask`*; a session as role A cannot leak
 context into a future session as role B.
 
-`pg_ask.forget(id)` returns `false` for both "unknown id" and "belongs
+`ask.forget(id)` returns `false` for both "unknown id" and "belongs
 to someone else". Same NotFound collapse as sessions: an attacker
 cannot probe id space for existence.
 
@@ -126,7 +131,7 @@ Embeddings themselves are sensitive — they can leak information about
 the stored text. The `_memories.embedding` column inherits the same
 GRANT story as the rest of the table (default `PUBLIC` SELECT, gated by
 the `owner` predicate at the SQL level). Operators with stricter needs
-should `REVOKE SELECT ON pg_ask._memories FROM PUBLIC` and grant on a
+should `REVOKE SELECT ON ask._memories FROM PUBLIC` and grant on a
 role-by-role basis; the memory functions still work because they run
 as `SECURITY INVOKER` and respect whatever you set.
 
@@ -151,10 +156,10 @@ values. Combine with RLS for defence in depth.
 ### Layer 5d — User-defined tools (v0.4)
 
 Operators can register custom SQL snippets via
-`pg_ask.register_tool(name, spec, body)`. The body supports `{{key}}`
+`ask.register_tool(name, spec, body)`. The body supports `{{key}}`
 placeholder interpolation from the model's jsonb arguments at invocation
 time. Each tool row carries an `owner = current_user` column;
-`pg_ask.unregister_tool(name)` deletes only the caller's own rows,
+`ask.unregister_tool(name)` deletes only the caller's own rows,
 with the same NotFound==Unauthorized collapse used for sessions and
 memories.
 
@@ -169,7 +174,7 @@ SQL migrations.
 
 ### Layer 6 — Audit log
 
-`pg_ask._traces` records every `ask()` / `sql()` / `preview()` /
+`ask._traces` records every `ask()` / `sql()` / `preview()` /
 `chat()` call: caller, db, kind, question, generated tool calls
 (arguments + truncated output), iteration count, latency, provider,
 model, error. This is the operator's eye into what the model has
@@ -177,7 +182,7 @@ been doing and what it has been told.
 
 Lockdown is the *opposite* of the other internals — we deliberately
 grant `SELECT` to `PUBLIC` so any logged-in role can audit its own
-activity. The only insert path is `pg_ask._write_trace(jsonb)`, a
+activity. The only insert path is `ask._write_trace(jsonb)`, a
 `SECURITY DEFINER` helper that fixes `search_path` and uses
 `gen_random_uuid()` for ids.
 
@@ -191,9 +196,9 @@ per-session with `SET LOCAL pg_ask.trace_enabled = off;`.
 ## Hardening checklist for production
 
 - [ ] Set `pg_ask.api_key` via `ALTER ROLE` or `SET LOCAL`. Drop the row
-      from `pg_ask._config`.
-- [ ] `REVOKE EXECUTE ON FUNCTION pg_ask.ask(text), pg_ask.sql(text),
-      pg_ask.preview(text), pg_ask.chat(uuid, text) FROM PUBLIC`.
+      from `ask._config`.
+- [ ] `REVOKE EXECUTE ON FUNCTION ask.ask(text), ask.sql(text),
+      ask.preview(text), ask.chat(uuid, text) FROM PUBLIC`.
 - [ ] Grant `EXECUTE` only to the roles that should ask.
 - [ ] Keep `pg_ask.readonly = true`.
 - [ ] Set `pg_ask.tool_statement_timeout_ms` to your normal interactive
@@ -202,9 +207,9 @@ per-session with `SET LOCAL pg_ask.trace_enabled = off;`.
       false`.
 - [ ] Set `pg_ask.sensitive_columns` to redact known-sensitive columns
       (e.g. `users.password, orders.cvv`).
-- [ ] Audit `pg_ask._tools` periodically — user-defined tools execute raw
+- [ ] Audit `ask._tools` periodically — user-defined tools execute raw
       SQL and bypass the sql_guard.
-- [ ] Monitor `pg_ask._traces` (v0.2) — unusual question rate, repeated
+- [ ] Monitor `ask._traces` (v0.2) — unusual question rate, repeated
       tool errors, or large row counts are early signals of abuse.
 - [ ] Run the extension owner as a non-superuser role with the minimum
       grants it needs.
@@ -218,5 +223,5 @@ per-session with `SET LOCAL pg_ask.trace_enabled = off;`.
   may produce surprising tool calls. The readonly + RLS combination is
   what keeps that from becoming a data breach.
 - **No protection against the model giving wrong answers.** Use
-  `pg_ask.preview()` (v0.2) when the answer matters and have a human
+  `ask.preview()` (v0.2) when the answer matters and have a human
   glance at the SQL first.

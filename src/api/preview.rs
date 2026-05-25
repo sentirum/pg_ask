@@ -1,7 +1,7 @@
-//! `pg_ask.preview(question)` — generate, explain, do not execute.
+//! `ask.preview(question)` — generate, explain, do not execute.
 //!
 //! Returns a single-row table-valued function so the result is composable in
-//! SQL (`SELECT * FROM pg_ask.preview('...')`, `\gx`, joins against
+//! SQL (`SELECT * FROM ask.preview('...')`, `\gx`, joins against
 //! `unnest(tables)`, etc.) without having to JSON-decode anything on the
 //! client side.
 //!
@@ -21,7 +21,7 @@ use crate::planner::{self, PreviewRow};
 use crate::telemetry::TraceKind;
 use pgrx::prelude::*;
 
-#[pg_extern(schema = "pg_ask", volatile, parallel_unsafe)]
+#[pg_extern(schema = "ask", volatile, parallel_unsafe)]
 fn preview(
     question: &str,
 ) -> TableIterator<
@@ -47,7 +47,7 @@ fn preview(
 
     let row = match result {
         Ok(r) => r,
-        Err(e) => error!("pg_ask.preview: {e}"),
+        Err(e) => error!("ask.preview: {e}"),
     };
 
     TableIterator::once((row.generated_sql, row.est_rows, row.tables, row.warnings))

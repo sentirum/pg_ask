@@ -1,5 +1,5 @@
 //! Distil a Postgres `EXPLAIN (FORMAT JSON)` plan into the operator-facing
-//! columns of `pg_ask.preview`.
+//! columns of `ask.preview`.
 //!
 //! Postgres emits a recursive `Plan` tree:
 //!

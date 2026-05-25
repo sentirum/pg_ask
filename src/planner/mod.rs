@@ -22,7 +22,7 @@ mod explain;
 use crate::infra::errors::{AskError, Result};
 use crate::sql_guard::{self, GuardMode};
 
-/// One result row of `pg_ask.preview`.
+/// One result row of `ask.preview`.
 #[derive(Debug)]
 pub struct PreviewRow {
     pub generated_sql: String,

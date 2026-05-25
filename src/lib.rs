@@ -12,11 +12,11 @@
 //! SET LOCAL pg_ask.model    = 'claude-sonnet-4-5';
 //!
 //! -- Or via table fallback (legacy / dev convenience):
-//! SELECT pg_ask.config('provider', 'anthropic');
-//! SELECT pg_ask.config('api_key',  'sk-ant-...');
+//! SELECT ask.config('provider', 'anthropic');
+//! SELECT ask.config('api_key',  'sk-ant-...');
 //!
-//! SELECT pg_ask.ask('How many orders shipped last week?');
-//! SELECT pg_ask.sql('top 5 customers by revenue');
+//! SELECT ask.ask('How many orders shipped last week?');
+//! SELECT ask.sql('top 5 customers by revenue');
 //! ```
 //!
 //! See `docs/ARCHITECTURE.md` for the module layout and `docs/SECURITY.md`
@@ -29,7 +29,7 @@ use pgrx::prelude::*;
 
 mod agent;
 mod api;
-mod bgworker;
+// mod bgworker; // v0.5 prototype — re-enable after cargo pgrx test passes
 mod embeddings;
 mod infra;
 mod memory;
@@ -40,6 +40,12 @@ mod session;
 mod sql_guard;
 mod telemetry;
 mod tools;
+
+// Declare the schema so pgrx SQL entity-graph generation emits
+// CREATE SCHEMA pg_ask before any #[pg_extern(schema = "ask")]
+// function definitions.
+#[pg_schema]
+mod ask {}
 
 // `#[pg_extern]` invocations live in `api/*`. The SQL entity-graph the
 // macro builds is what the pgrx schema generator walks, so we don't need
@@ -63,7 +69,7 @@ pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_string_guc(
         c"pg_ask.provider",
         c"Active provider name (e.g. anthropic, openai, gemini)",
-        c"Looked up first; falls back to pg_ask._config table.",
+        c"Looked up first; falls back to ask._config table.",
         &PROVIDER,
         GucContext::Userset,
         GucFlags::default(),
@@ -115,7 +121,7 @@ pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_bool_guc(
         c"pg_ask.readonly",
         c"Reject non-SELECT statements from the model",
-        c"Defaults to on. Disable only after auditing pg_ask._traces.",
+        c"Defaults to on. Disable only after auditing ask._traces.",
         &READONLY,
         GucContext::Userset,
         GucFlags::default(),
@@ -162,7 +168,7 @@ pub extern "C-unwind" fn _PG_init() {
     );
     GucRegistry::define_bool_guc(
         c"pg_ask.trace_enabled",
-        c"Write a row to pg_ask._traces for every ask() / chat() call",
+        c"Write a row to ask._traces for every ask() / chat() call",
         c"",
         &TRACE_ENABLED,
         GucContext::Userset,
@@ -181,7 +187,7 @@ pub extern "C-unwind" fn _PG_init() {
     );
 
     // ---------- Background worker (v0.5) ----------
-    bgworker::register();
+    // bgworker::register(); // re-enable with mod bgworker above
 
     // ---------- Memory / embedding (v0.3) ----------
     GucRegistry::define_string_guc(
@@ -286,7 +292,7 @@ mod tests {
 
     #[pg_test]
     fn version_string_matches_cargo() {
-        let v: Option<String> = Spi::get_one("SELECT pg_ask.version()").unwrap();
+        let v: Option<String> = Spi::get_one("SELECT ask.version()").unwrap();
         assert_eq!(v.as_deref(), Some(env!("CARGO_PKG_VERSION")));
     }
 }
