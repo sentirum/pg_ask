@@ -1,5 +1,9 @@
 # pg_ask
 
+[![CI](https://github.com/sentirum/pg_ask/actions/workflows/ci.yml/badge.svg)](https://github.com/sentirum/pg_ask/actions/workflows/ci.yml)
+[![Docker](https://ghcr.io/sentirum/pg_ask)](https://github.com/sentirum/pg_ask/pkgs/container/pg_ask)
+[![License: PostgreSQL](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](LICENSE)
+
 **Ask your PostgreSQL database in natural language.** An AI agent that runs
 inside the database, reads your schema, plans SQL, executes it via SPI in the
 current transaction, and synthesises an answer.
@@ -74,6 +78,32 @@ SELECT ask.ask('…')
   iterations, so `pg_cancel_backend` works.
 - **No `unsafe` outside `src/infra/subtxn.rs`**; all I/O is blocking `ureq`
   (PG backend is single-threaded, no async runtime).
+
+## Docker (quickest start)
+
+```bash
+# Pull and run (no Rust toolchain needed)
+docker run -d \
+  --name pg_ask \
+  -e POSTGRES_PASSWORD=secret \
+  -e PG_ASK_PROVIDER=anthropic \
+  -e PG_ASK_API_KEY=sk-ant-... \
+  -p 5432:5432 \
+  ghcr.io/sentirum/pg_ask:latest-pg18
+
+# Ask a question
+psql -h localhost -U postgres -d pg_ask_demo \
+  -c "SELECT ask.ask('how many tables are in this database?');"
+```
+
+Or with **docker compose** (env file supported):
+
+```bash
+PG_ASK_PROVIDER=anthropic PG_ASK_API_KEY=sk-ant-... \
+  docker compose up -d
+```
+
+See [`docker-compose.yml`](docker-compose.yml) for all options.
 
 ## Install (development)
 

@@ -360,11 +360,15 @@ likelihood of landing in this release:
 - [ ] Per-call config overrides as jsonb — still deferred unless a
       concrete operator need surfaces (`SET LOCAL` already covers
       session-scoped overrides).
-- [ ] **Distribution:** `META.json` + PGXN submission; signed
-      multi-arch Docker image (`ghcr.io/sentirum/pg_ask`);
-      `pgxman` manifest; GitHub release with prebuilt artefacts for
-      Linux x86_64/arm64 + macOS arm64; CI release pipeline tied to
-      `v*` tags.
+- [x] **Distribution:** GitHub Actions CI (PR gate: lint +
+      75 unit tests, no PG runtime required); release workflow
+      (v* tag → GitHub release + prebuilt Linux x86_64 pg18 tarball);
+      Docker multi-arch image
+      (`ghcr.io/sentirum/pg_ask:VERSION-pg18` + `latest-pg18`)
+      via GHCR + docker/buildx QEMU arm64. docker-compose.yml for
+      zero-config local try-out with PG_ASK_* env-var provider setup.
+- [ ] **Distribution (remaining):** `META.json` + PGXN submission;
+      `pgxman` manifest; macOS arm64 prebuilt artefact.
 - [ ] PG matrix CI expansion. v0.5.2 was production-tested on
       pg18 only; pg17 is the next likely target.
 
