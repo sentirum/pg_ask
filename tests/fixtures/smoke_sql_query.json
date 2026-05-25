@@ -1,0 +1,17 @@
+[
+  {
+    "text": "I'll count the rows in pg_class.",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "sql_query",
+        "arguments": {
+          "query": "SELECT count(*) AS n FROM pg_class WHERE relkind = 'r'"
+        }
+      }
+    ]
+  },
+  {
+    "final": "OK — pg_class lists the relation count above."
+  }
+]

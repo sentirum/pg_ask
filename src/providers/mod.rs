@@ -11,6 +11,7 @@
 //! through the OpenAI provider by overriding `base_url`.
 
 pub mod anthropic;
+pub mod fixture;
 pub mod gemini;
 pub mod openai;
 pub mod wire;
@@ -39,6 +40,12 @@ pub fn build(cfg: &RuntimeConfig, http: HttpClient) -> Result<Box<dyn Provider>>
     let key = cfg.provider.trim().to_ascii_lowercase();
     match key.as_str() {
         "anthropic" | "claude" => Ok(Box::new(anthropic::AnthropicProvider::new(cfg, http))),
+
+        // Test/CI-only provider: replays a disk-backed scripted
+        // conversation. See providers::fixture for the wire format.
+        // Lives in the regular registry (not behind a cfg flag) so
+        // operators can use it for smoke tests in staging too.
+        "fixture" => Ok(Box::new(fixture::FixtureProvider::new(cfg)?)),
 
         "gemini" | "google" | "google-genai" => {
             Ok(Box::new(gemini::GeminiProvider::new(cfg, http)))

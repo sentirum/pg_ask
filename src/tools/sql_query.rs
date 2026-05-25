@@ -122,6 +122,23 @@ fn run_query_to_text(
     let readonly_sql = "SET LOCAL transaction_read_only = on";
 
     Spi::connect_mut(|client| -> std::result::Result<String, String> {
+        // Audit FIRST, before we flip transaction_read_only. The audit
+        // row carries row_count = -1 to mean "query is about to run, no
+        // result yet"; we don't update it after the fact because doing
+        // so would require a second statement under the readonly GUC
+        // that we're about to set. -1 is documented in the column
+        // comment and `ask._sql_audit` consumers treat it as "in flight
+        // / unknown". Without this ordering, every sql_query call in
+        // readonly mode (the default) ERRORs with "cannot execute
+        // INSERT in a read-only transaction" on its own audit insert,
+        // which then poisons the outer transaction.
+        let _ = client.update(
+            "INSERT INTO ask._sql_audit (query, row_count, readonly, tool_name) \
+             VALUES ($1, $2, $3, 'sql_query')",
+            None,
+            &[query.into(), (-1i32).into(), readonly.into()],
+        );
+
         // GUC scope: SET LOCAL is automatically rolled back at end of the
         // outer transaction. Inside the same transaction these stay in
         // effect for every subsequent statement, including the user's
@@ -176,14 +193,8 @@ fn run_query_to_text(
             rows.push(cells);
         }
 
-        // Audit hook: log what the model asked us to run.
-        let row_count = rows.len() as i32;
-        let _ = client.update(
-            "INSERT INTO ask._sql_audit (query, row_count, readonly, tool_name) \
-             VALUES ($1, $2, $3, 'sql_query')",
-            None,
-            &[query.into(), row_count.into(), readonly.into()],
-        );
+        // (Audit row was written above, before transaction_read_only
+        // was flipped, with row_count = -1.)
 
         Ok(render_table(&col_names, &rows, truncated, max_rows))
     })

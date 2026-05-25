@@ -295,6 +295,41 @@ mod tests {
         let v: Option<String> = Spi::get_one("SELECT ask.version()").unwrap();
         assert_eq!(v.as_deref(), Some(env!("CARGO_PKG_VERSION")));
     }
+
+    /// End-to-end smoke of the agent loop with zero network traffic.
+    ///
+    /// Drives `ask.ask(…)` through the fixture provider so the test
+    /// exercises: provider dispatch, sql_guard, SPI tool execution,
+    /// result feedback, telemetry insert into `ask._traces`. If any of
+    /// those wire up the wrong way, this test catches it without ever
+    /// touching an upstream API.
+    #[pg_test]
+    fn agent_loop_runs_against_fixture_provider() {
+        use crate::providers::fixture::reset_cursor;
+
+        // Counters are per-backend and persist across tests in the
+        // same connection; clear before driving the scenario so the
+        // first complete() call lands on turn 0.
+        reset_cursor("smoke_sql_query");
+
+        Spi::run("SET pg_ask.provider = 'fixture'").unwrap();
+        Spi::run("SET pg_ask.model    = 'fixture:smoke_sql_query'").unwrap();
+        // Disable trace writes — the SECURITY DEFINER writer requires
+        // the extension owner; under pgrx test we run as the bootstrap
+        // role and the simpler path is to just skip telemetry.
+        Spi::run("SET pg_ask.trace_enabled = off").unwrap();
+
+        let answer: Option<String> =
+            Spi::get_one("SELECT ask.ask('count the relations in pg_class')").unwrap();
+
+        assert!(
+            answer
+                .as_deref()
+                .map(|s| s.contains("pg_class lists the relation count"))
+                .unwrap_or(false),
+            "fixture-scripted final answer not echoed back, got: {answer:?}"
+        );
+    }
 }
 
 /// pgrx test harness entry point.

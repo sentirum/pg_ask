@@ -134,9 +134,22 @@ impl RuntimeConfig {
     /// Build a snapshot from current GUC values, falling back to the table for
     /// unset string-valued keys.
     pub fn load() -> Result<Self> {
+        // The fixture provider runs off a disk-backed script and never
+        // touches the network, so it has no reason to require an
+        // api_key. Demanding one would force every pg_test fixture
+        // setup to also `SELECT ask.config('api_key', 'unused')`,
+        // which is just noise. For every real provider api_key stays
+        // mandatory.
+        let provider = required_string("provider", &PROVIDER)?;
+        let api_key = if provider.trim().eq_ignore_ascii_case("fixture") {
+            optional_string("api_key", &API_KEY).unwrap_or_default()
+        } else {
+            required_string("api_key", &API_KEY)?
+        };
+
         Ok(Self {
-            provider: required_string("provider", &PROVIDER)?,
-            api_key: required_string("api_key", &API_KEY)?,
+            provider,
+            api_key,
             model: optional_string("model", &MODEL),
             base_url: optional_string("base_url", &BASE_URL),
             max_tokens: clamp_pos("max_tokens", MAX_TOKENS.get())?,

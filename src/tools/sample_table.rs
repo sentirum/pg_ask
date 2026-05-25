@@ -119,6 +119,17 @@ fn run_sample(
     let readonly_sql = "SET LOCAL transaction_read_only = on";
 
     Spi::connect_mut(|client| -> std::result::Result<String, String> {
+        // Audit FIRST, before transaction_read_only is flipped. See
+        // the matching comment in tools::sql_query::run_query_to_text
+        // for the rationale; same bug, same fix. row_count is -1 to
+        // signal "query is about to run".
+        let _ = client.update(
+            "INSERT INTO ask._sql_audit (query, row_count, readonly, tool_name) \
+             VALUES ($1, $2, $3, 'sample_table')",
+            None,
+            &[query.into(), (-1i32).into(), readonly.into()],
+        );
+
         client
             .update(timeout_sql.as_str(), None, &[])
             .map_err(|e| e.to_string())?;
@@ -168,14 +179,8 @@ fn run_sample(
             rows.push(cells);
         }
 
-        // Audit hook
-        let row_count = rows.len() as i32;
-        let _ = client.update(
-            "INSERT INTO ask._sql_audit (query, row_count, readonly, tool_name) \
-             VALUES ($1, $2, $3, 'sample_table')",
-            None,
-            &[query.into(), row_count.into(), readonly.into()],
-        );
+        // (Audit row was written above, before transaction_read_only
+        // was flipped, with row_count = -1.)
 
         Ok(render_table(&col_names, &rows))
     })
