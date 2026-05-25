@@ -28,9 +28,7 @@ use crate::infra::http::HttpClient;
 use pgrx::Uuid;
 use serde_json::Value;
 
-pub use store::Hit;
-#[allow(unused_imports)] // re-exported for future api/admin tooling
-pub use store::MemoryRow;
+pub use store::{Hit, MemoryRow, NamespaceCount};
 
 /// Insert a new memory row. Returns its id.
 pub fn remember(
@@ -94,6 +92,28 @@ pub fn forget(id: Uuid) -> Result<bool> {
     let cfg = RuntimeConfig::load()?;
     ensure_memory_available(&cfg)?;
     store::delete(id)
+}
+
+/// Browse stored memories — owner-scoped, newest-first. Unlike
+/// [`recall`] this does not embed anything; it is a plain catalog read.
+/// `limit` is clamped inside the store to `[1, 200]`.
+pub fn list(
+    namespace: Option<&str>,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<MemoryRow>> {
+    let cfg = RuntimeConfig::load()?;
+    ensure_memory_available(&cfg)?;
+    store::list_memories(namespace, limit, offset)
+}
+
+/// Enumerate the caller's namespaces with row counts. Ordered by count
+/// desc — the agent / operator can use this to discover what is in
+/// memory before issuing a targeted `recall`.
+pub fn namespaces() -> Result<Vec<NamespaceCount>> {
+    let cfg = RuntimeConfig::load()?;
+    ensure_memory_available(&cfg)?;
+    store::list_namespaces()
 }
 
 // ---------- Helpers ----------

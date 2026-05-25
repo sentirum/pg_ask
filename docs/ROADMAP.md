@@ -101,8 +101,11 @@ In-progress milestone. Order of attack:
       are present (runtime-detected). Hard cap 25 hits.
 - [ ] Per-row metadata filters (deferred; jsonb is stored, filtering predicate
       sugar lands with `pg_ask.recall_where(query, filter jsonb)` in v0.4).
-- [ ] Voyage + Gemini embedding providers (scaffolding ready; same
-      trait, ~50 lines each).
+- [x] Voyage AI native + Google Gemini `batchEmbedContents` embedding
+      providers. Aliases `voyage`, `gemini`/`google`.
+- [x] `pg_ask.list_namespaces()` and `pg_ask.list_memories(namespace,
+      limit_n, offset_n)` admin SRFs — owner-scoped catalog view of
+      what is stored, no embedding round-trip.
 
 ## v0.4 — Tooling expansion, RLS-awareness
 

@@ -75,3 +75,50 @@ fn forget(id: Uuid) -> bool {
         Err(e) => error!("pg_ask.forget: {e}"),
     }
 }
+
+/// Browse memories the caller owns. Optional `namespace` filter; defaults
+/// to NULL (all namespaces). Newest-first, `limit_n` capped at 200.
+#[pg_extern(schema = "pg_ask", stable, parallel_safe)]
+fn list_memories(
+    namespace: default!(Option<&str>, "NULL"),
+    limit_n: default!(i32, "50"),
+    offset_n: default!(i32, "0"),
+) -> TableIterator<
+    'static,
+    (
+        name!(id, Uuid),
+        name!(namespace, String),
+        name!(content, String),
+        name!(metadata, pgrx::Json),
+        name!(created_at_iso, String),
+    ),
+> {
+    let rows = match memory::list(
+        namespace,
+        limit_n.max(1) as usize,
+        offset_n.max(0) as usize,
+    ) {
+        Ok(r) => r,
+        Err(e) => error!("pg_ask.list_memories: {e}"),
+    };
+    let materialised: Vec<_> = rows
+        .into_iter()
+        .map(|r| (r.id, r.namespace, r.content, pgrx::Json(r.metadata), r.created_at_iso))
+        .collect();
+    TableIterator::new(materialised.into_iter())
+}
+
+/// Enumerate namespaces the caller has populated, with row counts.
+/// Ordered by row count desc — a good "what is in here?" probe.
+#[pg_extern(schema = "pg_ask", stable, parallel_safe)]
+fn list_namespaces() -> TableIterator<
+    'static,
+    (name!(namespace, String), name!(n, i64)),
+> {
+    let rows = match memory::namespaces() {
+        Ok(r) => r,
+        Err(e) => error!("pg_ask.list_namespaces: {e}"),
+    };
+    let materialised: Vec<_> = rows.into_iter().map(|r| (r.namespace, r.n)).collect();
+    TableIterator::new(materialised.into_iter())
+}

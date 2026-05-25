@@ -19,10 +19,11 @@ SELECT pg_ask.sql('top 5 customers by lifetime revenue');
 -- FROM orders GROUP BY customer_id ORDER BY revenue DESC LIMIT 5;
 ```
 
-> **Status:** v0.3 in flight — Anthropic + OpenAI + Gemini chat, OpenAI embeddings,
-> pgvector-backed long-term memory, agent loop,
-> readonly SQL tool. OpenAI/Gemini, multi-turn sessions, and pgvector-backed
-> long-term memory land next.
+> **Status:** v0.3 complete — Anthropic + OpenAI + Gemini chat,
+> OpenAI / Voyage / Gemini embeddings, pgvector-backed long-term memory
+> (hybrid cosine + BM25-style ranking), multi-turn sessions, audit log,
+> agent loop, readonly SQL tool. RLS-aware schema dump and column
+> redaction land next in v0.4.
 
 ## Why
 
@@ -96,6 +97,30 @@ SELECT pg_ask.ask('list all tables and their row counts');
 | `max_tokens`     | `4096`                      | Per-completion cap.                            |
 | `max_iterations` | `16`                        | Hard ceiling on the agent loop.                |
 | `readonly`       | `true`                      | When `true`, `sql_query` refuses writes.       |
+
+### Long-term memory (v0.3, optional)
+
+`pg_ask` ships an opt-in memory layer backed by
+[pgvector](https://github.com/pgvector/pgvector). Install the extension
+first (`CREATE EXTENSION vector;`) and pick an embedding provider:
+
+```sql
+SET pg_ask.embedding_provider  = 'openai';      -- or voyage / gemini /
+                                                 -- together / vllm / ollama / ...
+SET pg_ask.embedding_api_key   = '...';          -- separate from chat key
+SET pg_ask.embedding_model     = 'text-embedding-3-small';
+SET pg_ask.embedding_dimensions = 1536;          -- must match _memories col width
+
+SELECT pg_ask.remember('User prefers concise SQL answers.');
+SELECT * FROM pg_ask.recall('what does the user prefer?');
+SELECT * FROM pg_ask.list_namespaces();
+SELECT * FROM pg_ask.list_memories(namespace := 'analytics', limit_n := 20);
+SELECT pg_ask.forget('uuid-here'::uuid);
+```
+
+The agent itself is wired up: when memory is configured and pgvector is
+installed, `pg_ask.ask(...)` exposes a `recall` tool to the model so it
+can pull relevant past context into the conversation on its own.
 
 ## Security
 

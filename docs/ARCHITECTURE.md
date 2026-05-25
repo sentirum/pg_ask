@@ -93,6 +93,8 @@ src/
   embeddings/
     mod.rs                   # EmbeddingProvider trait + factory
     openai.rs                # /v1/embeddings (also Together, vLLM, llama.cpp, ...)
+    voyage.rs                # Voyage AI native (input_type-aware in future)
+    gemini.rs                # Google :batchEmbedContents v1beta
   memory/
     mod.rs                   # remember / recall / forget; pgvector-aware
     store.rs                 # SPI primitives; hybrid_search SQL

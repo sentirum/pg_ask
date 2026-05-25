@@ -13,13 +13,21 @@ use pgrx::prelude::*;
 use pgrx::Uuid;
 use serde_json::Value;
 
-/// Reserved for the upcoming `pg_ask.list_memories()` admin SRF.
-#[allow(dead_code)]
+/// One row from `pg_ask.list_memories()` — caller-visible admin view.
 #[derive(Debug, Clone)]
 pub struct MemoryRow {
     pub id: Uuid,
+    pub namespace: String,
     pub content: String,
     pub metadata: Value,
+    pub created_at_iso: String,
+}
+
+/// One row from `pg_ask.list_namespaces()` — namespace + row count.
+#[derive(Debug, Clone)]
+pub struct NamespaceCount {
+    pub namespace: String,
+    pub n: i64,
 }
 
 /// A single recall result. `similarity` is the hybrid score (higher is
@@ -64,6 +72,121 @@ pub fn insert(
         ],
     )?;
     id.ok_or_else(|| AskError::Sql("INSERT INTO _memories returned no id".into()))
+}
+
+/// List every namespace the caller has ever stored something under,
+/// plus a row count per namespace. Ordered by count desc, then name.
+pub fn list_namespaces() -> Result<Vec<NamespaceCount>> {
+    let mut out: Vec<NamespaceCount> = Vec::new();
+    Spi::connect(|client| -> Result<()> {
+        let rows = client.select(
+            "SELECT namespace, COUNT(*)::bigint AS n
+               FROM pg_ask._memories
+              WHERE owner = current_user
+              GROUP BY namespace
+              ORDER BY n DESC, namespace ASC",
+            None,
+            &[],
+        )?;
+        for row in rows {
+            let ns: String = row
+                .get_datum_by_ordinal(1)
+                .ok()
+                .and_then(|d| d.value::<String>().ok().flatten())
+                .unwrap_or_default();
+            let n: i64 = row
+                .get_datum_by_ordinal(2)
+                .ok()
+                .and_then(|d| d.value::<i64>().ok().flatten())
+                .unwrap_or(0);
+            out.push(NamespaceCount { namespace: ns, n });
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// Browse the caller's memories. Owner-scoped; ordered newest-first.
+/// `limit` is clamped to `[1, 200]`; `offset` to `>= 0`.
+pub fn list_memories(
+    namespace: Option<&str>,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<MemoryRow>> {
+    let mut out: Vec<MemoryRow> = Vec::new();
+    let limit_i32 = i32::try_from(limit.clamp(1, 200)).unwrap_or(50);
+    let offset_i32 = i32::try_from(offset).unwrap_or(0).max(0);
+
+    // The optional namespace filter is folded into SQL via a NULL trick
+    // so we keep one prepared shape regardless of caller intent.
+    let query = "
+        SELECT id::text,
+               namespace,
+               content,
+               metadata::text,
+               to_char(created_at AT TIME ZONE 'UTC',
+                       'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_iso
+          FROM pg_ask._memories
+         WHERE owner = current_user
+           AND ($1::text IS NULL OR namespace = $1::text)
+         ORDER BY created_at DESC
+         LIMIT $2::int OFFSET $3::int
+    ";
+
+    Spi::connect(|client| -> Result<()> {
+        let rows = client.select(
+            query,
+            None,
+            &[
+                namespace.into(),
+                limit_i32.into(),
+                offset_i32.into(),
+            ],
+        )?;
+        for row in rows {
+            let id_text: String = row
+                .get_datum_by_ordinal(1)
+                .ok()
+                .and_then(|d| d.value::<String>().ok().flatten())
+                .unwrap_or_default();
+            let ns: String = row
+                .get_datum_by_ordinal(2)
+                .ok()
+                .and_then(|d| d.value::<String>().ok().flatten())
+                .unwrap_or_default();
+            let content: String = row
+                .get_datum_by_ordinal(3)
+                .ok()
+                .and_then(|d| d.value::<String>().ok().flatten())
+                .unwrap_or_default();
+            let metadata_text: String = row
+                .get_datum_by_ordinal(4)
+                .ok()
+                .and_then(|d| d.value::<String>().ok().flatten())
+                .unwrap_or_else(|| "{}".into());
+            let created_iso: String = row
+                .get_datum_by_ordinal(5)
+                .ok()
+                .and_then(|d| d.value::<String>().ok().flatten())
+                .unwrap_or_default();
+
+            let id = match parse_uuid(&id_text) {
+                Some(u) => u,
+                None => continue,
+            };
+            let metadata: Value =
+                serde_json::from_str(&metadata_text).unwrap_or(Value::Null);
+            out.push(MemoryRow {
+                id,
+                namespace: ns,
+                content,
+                metadata,
+                created_at_iso: created_iso,
+            });
+        }
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 pub fn delete(id: Uuid) -> Result<bool> {
@@ -214,4 +337,43 @@ fn parse_uuid(s: &str) -> Option<Uuid> {
         bytes[i] = byte;
     }
     Some(Uuid::from_bytes(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_vector_empty_is_brackets() {
+        assert_eq!(encode_vector(&[]), "[]");
+    }
+
+    #[test]
+    fn encode_vector_no_spaces_comma_separated() {
+        let v = encode_vector(&[0.5_f32, 1.0, -2.25]);
+        assert!(v.starts_with('['));
+        assert!(v.ends_with(']'));
+        assert!(!v.contains(' '));
+        // pgvector accepts this exact shape: `[0.5,1,-2.25]`.
+        // We don't pin the float formatting (Rust's `to_string`
+        // round-trips f32 and we don't care about trailing zeros),
+        // but we DO want the structural guarantees.
+        let stripped = &v[1..v.len() - 1];
+        assert_eq!(stripped.split(',').count(), 3);
+    }
+
+    #[test]
+    fn parse_uuid_accepts_hyphenated_form() {
+        let s = "550e8400-e29b-41d4-a716-446655440000";
+        let u = parse_uuid(s).expect("valid uuid");
+        let bytes = u.as_bytes();
+        assert_eq!(bytes[0], 0x55);
+        assert_eq!(bytes[15], 0x00);
+    }
+
+    #[test]
+    fn parse_uuid_rejects_short_input() {
+        assert!(parse_uuid("not-a-uuid").is_none());
+        assert!(parse_uuid("").is_none());
+    }
 }
