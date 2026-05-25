@@ -1,0 +1,42 @@
+[package]
+name = "pg_ask"
+version = "0.1.0"
+edition = "2021"
+license = "PostgreSQL"
+description = "PostgreSQL extension that turns natural language questions into agent-driven SQL — ask your database in English (or any language)."
+repository = "https://github.com/sentirum/pg_ask"
+readme = "README.md"
+keywords = ["postgres", "postgresql", "ai", "llm", "agent"]
+categories = ["database"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["pg18"]
+pg14 = ["pgrx/pg14", "pgrx-tests/pg14"]
+pg15 = ["pgrx/pg15", "pgrx-tests/pg15"]
+pg16 = ["pgrx/pg16", "pgrx-tests/pg16"]
+pg17 = ["pgrx/pg17", "pgrx-tests/pg17"]
+pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg_test = []
+
+[dependencies]
+pgrx = "=0.18.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Blocking HTTP — pgrx fonksiyonları sync; PG backend tek thread, async runtime istemiyoruz.
+ureq = { version = "2.10", features = ["json", "tls"] }
+thiserror = "1"
+
+[dev-dependencies]
+pgrx-tests = "=0.18.0"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1

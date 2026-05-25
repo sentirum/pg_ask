@@ -1,0 +1,20 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# pgrx
+/.cargo/config
+/sql/pg_ask--*.sql
+/target-*
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local env
+.env
+.env.*
+!.env.example
