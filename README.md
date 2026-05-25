@@ -19,7 +19,7 @@ SELECT pg_ask.sql('top 5 customers by lifetime revenue');
 -- FROM orders GROUP BY customer_id ORDER BY revenue DESC LIMIT 5;
 ```
 
-> **Status:** v0.1 — early. Anthropic provider, single-shot agent loop,
+> **Status:** v0.2 in flight — Anthropic + OpenAI providers, agent loop,
 > readonly SQL tool. OpenAI/Gemini, multi-turn sessions, and pgvector-backed
 > long-term memory land next.
 
@@ -88,7 +88,7 @@ SELECT pg_ask.ask('list all tables and their row counts');
 
 | Key              | Default                     | Notes                                          |
 |------------------|-----------------------------|------------------------------------------------|
-| `provider`       | *(required)*                | `anthropic` (v0.1). `openai`, `gemini` soon.   |
+| `provider`       | *(required)*                | `anthropic` · `openai` (also `groq`/`together`/`mistral`/`ollama`/`vllm`/`lmstudio` via `base_url`). Gemini coming next. |
 | `api_key`        | *(required)*                | Provider API key.                              |
 | `model`          | `claude-sonnet-4-5`         | Model id, provider-specific.                   |
 | `base_url`       | provider default            | For proxies / OpenAI-compatible endpoints.     |

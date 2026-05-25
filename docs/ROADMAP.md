@@ -52,8 +52,10 @@ In-progress milestone. Order of attack:
       the helper. `token` columns deferred until provider metadata lands.
 - [x] `pg_ask.trace_enabled` GUC honoured by writer; failures `WARNING`
       only — telemetry can never fail the user's call.
-- [ ] OpenAI provider (works with OpenAI-compatible endpoints: Groq,
-      Together, Ollama, vLLM via `base_url`).
+- [x] OpenAI provider — includes every OpenAI-compatible endpoint
+      (Groq, Together, Mistral, Ollama, vLLM, LM Studio) via `base_url`
+      override. Provider aliases recognised: `openai`, `openai-compat`,
+      `groq`, `together`, `mistral`, `ollama`, `vllm`, `lmstudio`.
 - [ ] Gemini provider.
 - [ ] Multi-turn sessions backed by `pg_ask._sessions` / `_messages`.
 - [ ] `pg_ask.chat(session_id, message)` — owner check, per-call config overrides as `jsonb`.

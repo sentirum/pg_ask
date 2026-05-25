@@ -80,9 +80,9 @@ src/
     dispatch.rs              # dispatch_tool(...)
   providers/
     mod.rs                   # Provider trait + ProviderResponse + factory
-    anthropic.rs
-    openai.rs                # v0.2
-    gemini.rs                # v0.2
+    anthropic.rs             # Anthropic Messages API
+    openai.rs                # OpenAI Chat Completions + every compat host
+    gemini.rs                # v0.2 (todo)
     wire.rs                  # canonical Message / ToolCall types
   tools/
     mod.rs                   # Tool trait + default_toolset
