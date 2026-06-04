@@ -112,6 +112,10 @@ pub struct TraceRecord {
     /// Snapshot of `cfg.trace_enabled` taken when `with_trace` loaded
     /// the runtime config. See type-level comment for rationale.
     trace_enabled: bool,
+    /// P4 fix: token usage from the provider response. Populated
+    /// by the agent loop after each provider call.
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
 }
 
 impl TraceRecord {
@@ -127,6 +131,8 @@ impl TraceRecord {
             started: Instant::now(),
             error: None,
             trace_enabled: cfg.trace_enabled,
+            prompt_tokens: None,
+            completion_tokens: None,
         }
     }
 
@@ -141,6 +147,8 @@ impl TraceRecord {
             "model":        self.model,
             "latency_ms":   self.started.elapsed().as_millis() as i64,
             "error":        self.error,
+            "prompt_tokens":     self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
         })
     }
 }

@@ -33,7 +33,7 @@ on:
 
 env:
   PG_MAJOR: "18"
-  PGRX_VERSION: "=0.18.0"
+  PGRX_VERSION: "=0.18.1"
 
 permissions:
   contents: write   # needed for gh-pages push

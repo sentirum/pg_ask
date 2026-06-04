@@ -158,10 +158,14 @@ impl Provider for FixtureProvider {
         })?;
 
         Ok(match turn {
-            FixtureTurn::Final { final_text } => ProviderResponse::Final { text: final_text },
+            FixtureTurn::Final { final_text } => ProviderResponse::Final {
+                text: final_text,
+                usage: None,
+            },
             FixtureTurn::ToolCalls { tool_calls, text } => ProviderResponse::ToolCalls {
                 text,
                 calls: tool_calls,
+                usage: None,
             },
         })
     }

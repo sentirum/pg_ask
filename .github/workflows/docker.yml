@@ -99,7 +99,7 @@ jobs:
           cache-to:   type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.arch }},mode=max
           build-args: |
             PG_MAJOR=18
-            PGRX_VERSION=0.18.0
+            PGRX_VERSION=0.18.1
 
       # Stage the digest for the merge job. Using one file per
       # platform under a shared directory keeps the upload tidy

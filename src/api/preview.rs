@@ -17,6 +17,7 @@
 
 use crate::agent::{self, AgentMode};
 use crate::api::trace::with_trace;
+use crate::infra::errors::raise_as_pg_error;
 use crate::planner::{self, PreviewRow};
 use crate::telemetry::TraceKind;
 use pgrx::prelude::*;
@@ -37,6 +38,10 @@ fn preview(
         let outcome = agent::run_with_cfg(cfg, question, Vec::new(), AgentMode::GenerateOnly)?;
         rec.iterations = outcome.iterations;
         rec.tool_calls = outcome.tool_calls.clone();
+        if outcome.prompt_tokens > 0 || outcome.completion_tokens > 0 {
+            rec.prompt_tokens = Some(outcome.prompt_tokens);
+            rec.completion_tokens = Some(outcome.completion_tokens);
+        }
         let row: PreviewRow = planner::preview(&outcome.text)?;
         // Record the cleaned SQL we actually previewed (post-EXPLAIN-strip),
         // not the raw model output — that's what operators want to see
@@ -47,7 +52,7 @@ fn preview(
 
     let row = match result {
         Ok(r) => r,
-        Err(e) => error!("ask.preview: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     };
 
     TableIterator::once((row.generated_sql, row.est_rows, row.tables, row.warnings))

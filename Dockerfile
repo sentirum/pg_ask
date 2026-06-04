@@ -5,7 +5,7 @@
 #   runtime: clean postgres base + the compiled .so + SQL files
 #
 # Usage:
-#   docker build -t pg_ask:0.5.2-pg18 .
+#   docker build -t pg_ask:0.5.3-pg18 .
 #   docker run -e POSTGRES_PASSWORD=secret \
 #              -e POSTGRES_DB=demo \
 #              -p 5432:5432 pg_ask:0.5.2-pg18
@@ -16,7 +16,7 @@
 #   SELECT ask.ask('how many tables do we have?');
 
 ARG PG_MAJOR=18
-ARG PGRX_VERSION=0.18.0
+ARG PGRX_VERSION=0.18.1
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 1: builder
@@ -90,7 +90,8 @@ RUN mkdir -p /staging/lib /staging/extension \
     && cp /usr/share/postgresql/${PG_MAJOR}/extension/pg_ask.control \
           /usr/share/postgresql/${PG_MAJOR}/extension/pg_ask*.sql \
           /staging/extension/ \
-    && cp sql/pg_ask--0.5.1--0.5.2.sql /staging/extension/ 2>/dev/null || true
+    && (cp sql/pg_ask--0.5.2--0.5.3.sql /staging/extension/ 2>/dev/null || true) \
+    && (cp sql/pg_ask--0.5.1--0.5.2.sql /staging/extension/ 2>/dev/null || true)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 2: runtime

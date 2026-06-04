@@ -74,7 +74,7 @@ pub fn run_stream_with_cfg(
 
         let resp = provider.complete(&system_prompt, &history, &specs)?;
         match resp {
-            ProviderResponse::Final { text } => {
+            ProviderResponse::Final { text, usage: _ } => {
                 history.push(Message {
                     role: Role::Assistant,
                     content: MessageContent::Text(text.clone()),
@@ -83,7 +83,7 @@ pub fn run_stream_with_cfg(
                 break;
             }
 
-            ProviderResponse::ToolCalls { text, calls } => {
+            ProviderResponse::ToolCalls { text, calls, usage: _ } => {
                 if let Some(ref t) = text {
                     if !t.is_empty() {
                         out.push(format!("[thinking] {t}"));

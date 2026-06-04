@@ -206,6 +206,15 @@ fn extract_function_name(tool_call_id: &str) -> String {
 struct GenerateResponse {
     #[serde(default)]
     candidates: Vec<Candidate>,
+    /// P4 fix: token usage from Gemini.
+    #[serde(default)]
+    usage_metadata: Option<GeminiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiUsage {
+    prompt_token_count: Option<i64>,
+    candidates_token_count: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,6 +247,15 @@ struct FunctionCall {
 }
 
 fn parse_response(resp: GenerateResponse) -> Result<ProviderResponse> {
+    let usage = resp.usage_metadata.and_then(|u| {
+        match (u.prompt_token_count, u.candidates_token_count) {
+            (Some(p), Some(c)) => Some(crate::providers::TokenUsage {
+                prompt_tokens: p,
+                completion_tokens: c,
+            }),
+            _ => None,
+        }
+    });
     let candidate = resp
         .candidates
         .into_iter()
@@ -276,6 +294,7 @@ fn parse_response(resp: GenerateResponse) -> Result<ProviderResponse> {
         return Ok(ProviderResponse::ToolCalls {
             text: combined_text,
             calls: tool_calls,
+            usage,
         });
     }
 
@@ -283,7 +302,7 @@ fn parse_response(resp: GenerateResponse) -> Result<ProviderResponse> {
     // text is unusual but defensible (e.g. safety blocks); surface it as
     // an explicit error so the SQL caller doesn't get a silent "".
     match combined_text {
-        Some(text) => Ok(ProviderResponse::Final { text }),
+        Some(text) => Ok(ProviderResponse::Final { text, usage }),
         None => {
             let reason = candidate
                 .finish_reason

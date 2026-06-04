@@ -58,11 +58,25 @@ pub struct ToolSpec {
 #[derive(Debug)]
 pub enum ProviderResponse {
     /// Final answer; no more iterations needed.
-    Final { text: String },
+    Final {
+        text: String,
+        /// Token usage from this response (P4 fix). Populated
+        /// when the provider returns `usage` in its response.
+        usage: Option<TokenUsage>,
+    },
     /// Model wants to call one or more tools before continuing.
     ToolCalls {
         /// Optional reasoning text the model emitted alongside the tool calls.
         text: Option<String>,
         calls: Vec<ToolCall>,
+        /// Token usage from this response.
+        usage: Option<TokenUsage>,
     },
+}
+
+/// Token usage reported by the provider.
+#[derive(Debug, Clone, Copy)]
+pub struct TokenUsage {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
 }

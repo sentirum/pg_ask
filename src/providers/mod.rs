@@ -21,7 +21,7 @@ use crate::infra::errors::{AskError, Result};
 use crate::infra::http::HttpClient;
 
 #[allow(unused_imports)]
-pub use wire::{Message, MessageContent, ProviderResponse, Role, ToolCall, ToolSpec};
+pub use wire::{Message, MessageContent, ProviderResponse, Role, TokenUsage, ToolCall, ToolSpec};
 
 /// Wire-format-agnostic chat provider.
 pub trait Provider {

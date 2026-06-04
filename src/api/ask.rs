@@ -9,6 +9,7 @@
 
 use crate::agent::{self, AgentMode};
 use crate::api::trace::with_trace;
+use crate::infra::errors::raise_as_pg_error;
 use crate::telemetry::TraceKind;
 use pgrx::prelude::*;
 
@@ -30,6 +31,8 @@ fn ask_stream(question: &str) -> SetOfIterator<'static, String> {
         Ok(lines) => SetOfIterator::new(lines.into_iter()),
         Err(e) => SetOfIterator::once(format!("[error] {e}")),
     }
+    // Note: streaming surface returns error as text rather than raising
+    // a PG ERROR so the client sees partial output.
 }
 
 /// Ask the database a natural-language question. The agent reads the schema,
@@ -42,11 +45,16 @@ fn ask(question: &str) -> String {
         rec.iterations = outcome.iterations;
         rec.tool_calls = outcome.tool_calls.clone();
         rec.final_text = Some(outcome.text.clone());
+        // P4 fix: propagate token usage to trace record.
+        if outcome.prompt_tokens > 0 || outcome.completion_tokens > 0 {
+            rec.prompt_tokens = Some(outcome.prompt_tokens);
+            rec.completion_tokens = Some(outcome.completion_tokens);
+        }
         Ok(outcome.text)
     });
     match result {
         Ok(text) => text,
-        Err(e) => error!("ask.ask: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     }
 }
 
@@ -59,10 +67,14 @@ fn sql(question: &str) -> String {
         rec.iterations = outcome.iterations;
         rec.tool_calls = outcome.tool_calls.clone();
         rec.final_text = Some(outcome.text.clone());
+        if outcome.prompt_tokens > 0 || outcome.completion_tokens > 0 {
+            rec.prompt_tokens = Some(outcome.prompt_tokens);
+            rec.completion_tokens = Some(outcome.completion_tokens);
+        }
         Ok(outcome.text)
     });
     match result {
         Ok(text) => text,
-        Err(e) => error!("ask.sql: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     }
 }

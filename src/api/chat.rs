@@ -13,6 +13,7 @@
 
 use crate::agent::{self, AgentMode};
 use crate::api::trace::with_trace;
+use crate::infra::errors::raise_as_pg_error;
 use crate::session;
 use crate::telemetry::TraceKind;
 use pgrx::prelude::*;
@@ -23,7 +24,7 @@ use pgrx::Uuid;
 fn create_session(label: Option<String>) -> Uuid {
     match session::create(label.as_deref()) {
         Ok(id) => id,
-        Err(e) => error!("ask.create_session: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     }
 }
 
@@ -38,6 +39,10 @@ fn chat(session_id: Uuid, message: &str) -> String {
         rec.iterations = outcome.iterations;
         rec.tool_calls = outcome.tool_calls.clone();
         rec.final_text = Some(outcome.text.clone());
+        if outcome.prompt_tokens > 0 || outcome.completion_tokens > 0 {
+            rec.prompt_tokens = Some(outcome.prompt_tokens);
+            rec.completion_tokens = Some(outcome.completion_tokens);
+        }
 
         // Persist *after* the agent succeeds so a failed turn doesn't leave
         // a half-written tool-result chain.
@@ -47,7 +52,7 @@ fn chat(session_id: Uuid, message: &str) -> String {
     });
     match result {
         Ok(text) => text,
-        Err(e) => error!("ask.chat: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     }
 }
 
@@ -55,7 +60,7 @@ fn chat(session_id: Uuid, message: &str) -> String {
 #[pg_extern(schema = "ask", volatile, parallel_unsafe)]
 fn clear_session(session_id: Uuid) -> bool {
     if let Err(e) = session::clear(session_id) {
-        error!("ask.clear_session: {e}");
+        raise_as_pg_error(&e);
     }
     true
 }

@@ -18,6 +18,7 @@
 //! invisible to role B. The `recall` SRF is a table-valued function so
 //! the result is JOIN-able against your own tables.
 
+use crate::infra::errors::raise_as_pg_error;
 use crate::memory;
 use pgrx::prelude::*;
 use pgrx::Uuid;
@@ -33,7 +34,7 @@ fn remember(
     let md = metadata.map(|j| j.0);
     match memory::remember(content, Some(namespace), md) {
         Ok(id) => id,
-        Err(e) => error!("ask.remember: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     }
 }
 
@@ -54,7 +55,7 @@ fn recall(
 > {
     let hits = match memory::recall(query, Some(namespace), limit_n.max(1) as usize) {
         Ok(h) => h,
-        Err(e) => error!("ask.recall: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     };
 
     // Materialise once: TableIterator wants 'static, and the hit set is
@@ -72,7 +73,7 @@ fn recall(
 fn forget(id: Uuid) -> bool {
     match memory::forget(id) {
         Ok(b) => b,
-        Err(e) => error!("ask.forget: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     }
 }
 
@@ -95,7 +96,7 @@ fn list_memories(
 > {
     let rows = match memory::list(namespace, limit_n.max(1) as usize, offset_n.max(0) as usize) {
         Ok(r) => r,
-        Err(e) => error!("ask.list_memories: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     };
     let materialised: Vec<_> = rows
         .into_iter()
@@ -118,7 +119,7 @@ fn list_memories(
 fn list_namespaces() -> TableIterator<'static, (name!(namespace, String), name!(n, i64))> {
     let rows = match memory::namespaces() {
         Ok(r) => r,
-        Err(e) => error!("ask.list_namespaces: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     };
     let materialised: Vec<_> = rows.into_iter().map(|r| (r.namespace, r.n)).collect();
     TableIterator::new(materialised.into_iter())

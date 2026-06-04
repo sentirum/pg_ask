@@ -31,9 +31,18 @@ use crate::infra::errors::{AskError, Result};
 use crate::infra::http::HttpClient;
 use serde::Deserialize;
 use serde_json::json;
+use std::thread;
+use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 const DEFAULT_MODEL: &str = "text-embedding-3-small";
+
+/// Maximum number of retry attempts for transient embedding failures.
+const MAX_RETRIES: u32 = 3;
+/// Base delay for exponential backoff (milliseconds).
+const BACKOFF_BASE_MS: u64 = 200;
+/// Maximum jitter factor (0.0–0.5) added to avoid thundering herd.
+const JITTER_FRACTION: f64 = 0.25;
 
 pub struct OpenAiEmbeddings {
     http: HttpClient,
@@ -76,7 +85,10 @@ impl EmbeddingProvider for OpenAiEmbeddings {
             "input": texts,
         });
 
-        let parsed: EmbedResponse = self.http.post_json(&url, &headers, &body)?;
+        // P2 fix: exponential backoff with jitter for transient failures.
+        // Retries on 429 (rate limit) and 5xx (server error). All other
+        // errors (4xx, transport, parse) surface immediately.
+        let parsed: EmbedResponse = self.embed_with_retry(&url, &headers, &body)?;
         let mut data = parsed.data;
         data.sort_by_key(|d| d.index);
 
@@ -103,6 +115,75 @@ impl EmbeddingProvider for OpenAiEmbeddings {
 
     fn dimensions(&self) -> usize {
         self.dimensions
+    }
+}
+
+impl OpenAiEmbeddings {
+    /// Execute the embedding HTTP call with exponential backoff + jitter.
+    ///
+    /// Retries are only attempted for retriable errors:
+    /// - HTTP 429 (Too Many Requests)
+    /// - HTTP 5xx (server-side failures)
+    /// - Transport errors (network timeout, connection reset)
+    ///
+    /// Non-retriable errors (4xx client errors other than 429, JSON parse
+    /// failures) surface immediately.
+    fn embed_with_retry<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &serde_json::Value,
+    ) -> Result<T> {
+        let mut last_err: Option<AskError> = None;
+
+        for attempt in 0..=MAX_RETRIES {
+            match self.http.post_json::<T>(url, headers, body) {
+                Ok(resp) => return Ok(resp),
+                Err(
+                    ref e @ AskError::ProviderHttp { .. }
+                    | ref e @ AskError::Transport(_),
+                ) => {
+                    let retriable = match e {
+                        AskError::ProviderHttp { status, .. } => {
+                            *status == 429 || (500..600).contains(status)
+                        }
+                        AskError::Transport(_) => true,
+                        _ => false,
+                    };
+
+                    if !retriable || attempt == MAX_RETRIES {
+                        return Err(e.clone());
+                    }
+
+                    last_err = Some(e.clone());
+                    let delay = Self::backoff_delay(attempt);
+                    pgrx::warning!(
+                        "pg_ask embedding: attempt {}/{} failed ({e}), retrying in {}ms",
+                        attempt + 1,
+                        MAX_RETRIES + 1,
+                        delay.as_millis()
+                    );
+                    thread::sleep(delay);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Unreachable in practice — the loop always returns via the
+        // Ok or non-retriable Err arms. But the compiler doesn't know that.
+        Err(last_err.unwrap_or_else(|| AskError::Transport("all retry attempts exhausted".into())))
+    }
+
+    /// Compute exponential backoff delay: `BACKOFF_BASE_MS * 2^attempt`
+    /// with ±JITTER_FRACTION randomness.
+    fn backoff_delay(attempt: u32) -> Duration {
+        let base = BACKOFF_BASE_MS * 2u64.saturating_pow(attempt);
+        // Simple jitter: use the attempt counter as a cheap pseudo-random
+        // seed. We don't need cryptographic randomness — just enough to
+        // desynchronise concurrent retries from the same backend.
+        let jitter = ((attempt as f64 * 0.618) % 1.0) * (base as f64) * JITTER_FRACTION;
+        let delay_ms = base + jitter as u64;
+        Duration::from_millis(delay_ms)
     }
 }
 

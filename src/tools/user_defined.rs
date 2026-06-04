@@ -90,6 +90,18 @@ pub struct UserDefinedTool {
     pub statement_timeout_ms: u64,
 }
 
+impl Clone for UserDefinedTool {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            body: self.body.clone(),
+            spec: self.spec.clone(),
+            readonly: self.readonly,
+            statement_timeout_ms: self.statement_timeout_ms,
+        }
+    }
+}
+
 impl Tool for UserDefinedTool {
     fn spec(&self) -> ToolSpec {
         self.spec.clone()

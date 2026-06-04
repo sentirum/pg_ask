@@ -33,7 +33,7 @@
 //! C8 (model-issued `current_setting('pg_ask.api_key')`) is a separate
 //! fix in `sql_guard`.
 
-use crate::infra::config;
+use crate::infra::{config, errors::raise_as_pg_error};
 use pgrx::prelude::*;
 
 /// Keys whose stored value is never returned by `ask.get_config`.
@@ -58,7 +58,7 @@ fn is_secret(key: &str) -> bool {
 #[pg_extern(schema = "ask", security_definer, volatile, parallel_unsafe)]
 fn config(key: &str, value: &str) -> bool {
     if let Err(e) = config::upsert_table(key, value) {
-        error!("ask.config: {e}");
+        raise_as_pg_error(&e);
     }
     true
 }
@@ -87,7 +87,7 @@ fn config(key: &str, value: &str) -> bool {
 fn get_config(key: &str) -> Option<String> {
     let raw = match config::read_table(key) {
         Ok(v) => v,
-        Err(e) => error!("ask.get_config: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     };
     match raw {
         Some(_) if is_secret(key) => Some(REDACTED.to_string()),

@@ -145,8 +145,11 @@ fn ensure_memory_available(cfg: &RuntimeConfig) -> Result<()> {
     // "pgvector missing" and the "table missing" cases. We still
     // surface a distinct error message for missing pgvector because the
     // operator action is different (install the extension vs. nothing).
-    let bootstrapped: Option<bool> = pgrx::Spi::get_one("SELECT ask._memory_bootstrap()")
-        .map_err(|e| AskError::Sql(format!("_memory_bootstrap: {e}")))?;
+    let bootstrapped: Option<bool> = pgrx::Spi::get_one_with_args(
+        "SELECT ask._memory_bootstrap($1)",
+        &[(cfg.embedding_dimensions as i32).into()],
+    )
+    .map_err(|e| AskError::Sql(format!("_memory_bootstrap: {e}")))?;
     if !bootstrapped.unwrap_or(false) {
         return Err(AskError::Sql(
             "memory layer requires pgvector — run `CREATE EXTENSION vector;` first".into(),

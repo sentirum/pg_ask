@@ -2,6 +2,9 @@
 name = "pg_ask"
 version = "0.5.3"
 edition = "2021"
+rust-version = "1.82"
+# ^ Minimum Supported Rust Version. pgrx 0.18 requires 1.82+.
+# Operators building from source must have at least this toolchain.
 license = "PostgreSQL"
 description = "PostgreSQL extension that turns natural language questions into agent-driven SQL — ask your database in English (or any language)."
 repository = "https://github.com/sentirum/pg_ask"
@@ -22,7 +25,7 @@ pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
 pg_test = []
 
 [dependencies]
-pgrx = "=0.18.0"
+pgrx = "=0.18.1"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object key order during deserialization,
 # which we rely on in `tools::render::row_to_json` to preserve column
@@ -51,7 +54,7 @@ thiserror = "2"
 sqlparser = { version = "0.62", features = ["visitor"] }
 
 [dev-dependencies]
-pgrx-tests = "=0.18.0"
+pgrx-tests = "=0.18.1"
 
 [profile.dev]
 panic = "unwind"

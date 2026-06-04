@@ -61,10 +61,16 @@ impl Provider for OpenAiProvider {
         tools: &[ToolSpec],
     ) -> Result<ProviderResponse> {
         let body = build_request(&self.model, self.max_tokens, system, history, tools);
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.base_url.trim_end_matches('/')
-        );
+        // URL construction: if base_url already contains the full
+        // endpoint path (e.g. ZAI uses /api/paas/v4/chat/completions
+        // instead of the OpenAI-standard /v1/chat/completions), respect
+        // it. Otherwise append /v1/chat/completions.
+        let base = self.base_url.trim_end_matches('/');
+        let url = if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else {
+            format!("{base}/v1/chat/completions")
+        };
         let bearer = format!("Bearer {}", self.api_key);
         let headers: [(&str, &str); 1] = [("authorization", bearer.as_str())];
 
@@ -174,6 +180,15 @@ fn message_to_wire(msg: &Message) -> Value {
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    /// P4 fix: token usage from the provider.
+    #[serde(default)]
+    usage: Option<WireUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireUsage {
+    prompt_tokens: i64,
+    completion_tokens: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +222,11 @@ struct WireFunction {
 }
 
 fn parse_response(resp: ChatResponse) -> Result<ProviderResponse> {
+    let usage = resp.usage.map(|u| crate::providers::TokenUsage {
+        prompt_tokens: u.prompt_tokens,
+        completion_tokens: u.completion_tokens,
+    });
+
     let choice = resp
         .choices
         .into_iter()
@@ -218,7 +238,7 @@ fn parse_response(resp: ChatResponse) -> Result<ProviderResponse> {
 
     if raw_calls.is_empty() && choice.finish_reason.as_deref() != Some("tool_calls") {
         return match text {
-            Some(t) => Ok(ProviderResponse::Final { text: t }),
+            Some(t) => Ok(ProviderResponse::Final { text: t, usage }),
             None => Err(AskError::EmptyResponse),
         };
     }
@@ -239,5 +259,5 @@ fn parse_response(resp: ChatResponse) -> Result<ProviderResponse> {
         })
         .collect();
 
-    Ok(ProviderResponse::ToolCalls { text, calls })
+    Ok(ProviderResponse::ToolCalls { text, calls, usage })
 }

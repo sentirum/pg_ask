@@ -17,6 +17,16 @@ use crate::infra::errors::Result;
 use crate::infra::http::HttpClient;
 use crate::providers::ToolSpec;
 use pgrx::prelude::*;
+use std::cell::RefCell;
+use std::time::Instant;
+
+/// P3 fix: per-backend TTL cache for user-defined tools.
+/// Avoids a SPI round-trip to ask._tools on every ask() call.
+const TOOL_CACHE_TTL_SECS: u64 = 5;
+
+thread_local! {
+    static TOOL_CACHE: RefCell<Option<(std::string::String, Instant, Vec<user_defined::UserDefinedTool>)>> = RefCell::new(None);
+}
 
 /// Result of executing a single tool call. Errors that the model should
 /// be allowed to see and recover from are reported as `is_error = true`
@@ -104,11 +114,50 @@ pub fn default_toolset(
 /// Silently returns an empty vec on SPI failure so a broken _tools table
 /// does not crash the agent loop.
 ///
+/// P3 fix: results are cached per-backend for 5 seconds (TTL). The cache
+/// key includes the current user so `SET ROLE` doesn't leak cached tools
+/// across roles. On cache miss the SPI query runs as before.
+///
 /// `readonly` and `statement_timeout_ms` are baked into every returned
 /// `UserDefinedTool` so HP1 (subtxn + per-call GUCs) has the policy
 /// it needs without a second config load per tool invocation. Threaded
 /// from the surrounding `RuntimeConfig` snapshot at the caller.
 pub fn load_user_tools(
+    readonly: bool,
+    statement_timeout_ms: u64,
+) -> Result<Vec<user_defined::UserDefinedTool>> {
+    let current_user: String = Spi::get_one("SELECT current_user")
+        .ok().flatten()
+        .unwrap_or_default();
+
+    // Check the TTL cache first.
+    let cache_hit = TOOL_CACHE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|(user, ts, tools)| {
+                if *user == current_user && ts.elapsed().as_secs() < TOOL_CACHE_TTL_SECS {
+                    Some(tools.clone())
+                } else {
+                    None
+                }
+            })
+    });
+
+    if let Some(cached) = cache_hit {
+        return Ok(cached.clone());
+    }
+
+    let tools = load_user_tools_from_spi(readonly, statement_timeout_ms)?;
+
+    // Populate cache.
+    TOOL_CACHE.with(|c| {
+        *c.borrow_mut() = Some((current_user, Instant::now(), tools.clone()));
+    });
+
+    Ok(tools)
+}
+
+fn load_user_tools_from_spi(
     readonly: bool,
     statement_timeout_ms: u64,
 ) -> Result<Vec<user_defined::UserDefinedTool>> {

@@ -51,7 +51,14 @@ impl Provider for AnthropicProvider {
         tools: &[ToolSpec],
     ) -> Result<ProviderResponse> {
         let body = build_request(&self.model, self.max_tokens, system, history, tools);
-        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        // URL construction: if base_url already contains the full
+        // endpoint path, respect it. Otherwise append /v1/messages.
+        let base = self.base_url.trim_end_matches('/');
+        let url = if base.ends_with("/messages") {
+            base.to_string()
+        } else {
+            format!("{base}/v1/messages")
+        };
         let headers: [(&str, &str); 2] = [
             ("x-api-key", self.api_key.as_str()),
             ("anthropic-version", API_VERSION),
@@ -146,6 +153,15 @@ fn message_to_wire(msg: &Message) -> Value {
 struct MessagesResponse {
     content: Vec<ContentBlock>,
     stop_reason: Option<String>,
+    /// P4 fix: token usage from Anthropic.
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicUsage {
+    input_tokens: i64,
+    output_tokens: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +180,11 @@ enum ContentBlock {
 }
 
 fn parse_response(resp: MessagesResponse) -> Result<ProviderResponse> {
+    let usage = resp.usage.map(|u| crate::providers::TokenUsage {
+        prompt_tokens: u.input_tokens,
+        completion_tokens: u.output_tokens,
+    });
+
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
@@ -189,11 +210,12 @@ fn parse_response(resp: MessagesResponse) -> Result<ProviderResponse> {
         return Ok(ProviderResponse::ToolCalls {
             text: combined_text,
             calls: tool_calls,
+            usage,
         });
     }
 
     match combined_text {
-        Some(text) => Ok(ProviderResponse::Final { text }),
+        Some(text) => Ok(ProviderResponse::Final { text, usage }),
         None => Err(AskError::EmptyResponse),
     }
 }

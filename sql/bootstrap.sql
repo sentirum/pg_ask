@@ -71,10 +71,21 @@ CREATE TABLE IF NOT EXISTS ask._traces (
     provider     text,
     model        text,
     latency_ms   int,
-    error        text
+    error        text,
+    -- P4 fix: token usage from provider response.
+    prompt_tokens     int,
+    completion_tokens int
 );
 CREATE INDEX IF NOT EXISTS _traces_ts_idx     ON ask._traces (ts DESC);
 CREATE INDEX IF NOT EXISTS _traces_caller_idx ON ask._traces (caller, ts DESC);
+
+-- S6 fix: _traces visibility is owner-scoped via RLS. Only the calling
+-- role (recorded in `caller`) can see their own traces. Superusers bypass
+-- RLS and see everything (standard PG behaviour).
+ALTER TABLE ask._traces ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS _traces_owner_select ON ask._traces;
+CREATE POLICY _traces_owner_select ON ask._traces
+    FOR SELECT USING (caller = session_user);
 
 -- The writer takes a single jsonb payload so the Rust side never has to
 -- learn the column order. SECURITY DEFINER lets ordinary roles produce
@@ -96,7 +107,8 @@ SET search_path = pg_catalog, pg_temp
 AS $$
     INSERT INTO ask._traces
         (caller, kind, question, iterations, tool_calls,
-         final_text, provider, model, latency_ms, error)
+         final_text, provider, model, latency_ms, error,
+         prompt_tokens, completion_tokens)
     VALUES (
         COALESCE(payload->>'caller',     session_user),
         payload->>'kind',
@@ -107,7 +119,9 @@ AS $$
         payload->>'provider',
         payload->>'model',
         NULLIF(payload->>'latency_ms', '')::int,
-        payload->>'error'
+        payload->>'error',
+        NULLIF(payload->>'prompt_tokens', '')::int,
+        NULLIF(payload->>'completion_tokens', '')::int
     )
     RETURNING id;
 $$;
@@ -127,51 +141,80 @@ $$;
 -- gated on pgvector being present; bootstrap calls it once, and so
 -- does every public memory entry point through `ensure_memory_table`.
 --
--- Embedding dimension is fixed at 1536 (OpenAI text-embedding-3-small,
--- Gemini text-embedding-004). Operators using larger models must ALTER
--- the column after install — see docs/SECURITY.md.
+-- S3 fix: the helper now accepts an explicit `dimensions` parameter
+-- (defaults to 1536 for backward compatibility). This lets operators
+-- use any embedding model without hand-editing the column type.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION ask._memory_bootstrap()
+CREATE OR REPLACE FUNCTION ask._memory_bootstrap(dims int DEFAULT 1536)
 RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
+DECLARE
+    existing_dims int;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
         RETURN false;
     END IF;
-    -- Already installed? Cheap fast-path so a hot recall() doesn't pay
-    -- for the DDL probes every call.
+    -- Already installed? Check dimension compatibility.
     IF EXISTS (SELECT 1 FROM pg_class
                 WHERE relnamespace = 'ask'::regnamespace
                   AND relname = '_memories') THEN
+        -- Verify existing column width matches the requested dimensions.
+        -- A mismatch means the operator changed embedding models without
+        -- ALTERing the column — surface a clear error with remediation.
+        EXECUTE format('
+            SELECT a.atttypmod
+              FROM pg_attribute a
+              JOIN pg_class c ON c.oid = a.attrelid
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = ''ask''
+               AND c.relname = ''_memories''
+               AND a.attname = ''embedding''
+        ') INTO existing_dims;
+        -- pgvector stores dimensions as (typmod & 0xFFFF) for vector type.
+        -- If typmod is -1 the column exists but type info is opaque;
+        -- skip the check in that edge case.
+        IF existing_dims IS NOT NULL AND existing_dims != -1 THEN
+            existing_dims := existing_dims & 65535;
+            IF existing_dims != dims THEN
+                RAISE EXCEPTION
+                    'ask._memories.embedding is vector(%), but pg_ask.embedding_dimensions = %. '
+                    'Run: ALTER TABLE ask._memories ALTER COLUMN embedding TYPE vector(%);',
+                    existing_dims, dims, dims
+                    USING ERRCODE = 'invalid_parameter_value';
+            END IF;
+        END IF;
         RETURN true;
     END IF;
 
     -- DDL goes through EXECUTE because the vector type may not have been
     -- known to the parser when this function was compiled (it isn't
     -- referenced at parse time, only at execute time).
-    EXECUTE $ddl$
+    EXECUTE format($ddl$
         CREATE TABLE IF NOT EXISTS ask._memories (
             id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
             owner      name        NOT NULL DEFAULT current_user,
             namespace  text        NOT NULL DEFAULT 'default',
             content    text        NOT NULL,
             metadata   jsonb       NOT NULL DEFAULT '{}'::jsonb,
-            embedding  vector(1536) NOT NULL,
+            embedding  vector(%s)  NOT NULL,
             tsv        tsvector    GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
             created_at timestamptz NOT NULL DEFAULT now()
         )
-    $ddl$;
+    $ddl$, dims);
     CREATE INDEX IF NOT EXISTS _memories_owner_ns_idx
         ON ask._memories (owner, namespace, created_at DESC);
     CREATE INDEX IF NOT EXISTS _memories_tsv_idx
         ON ask._memories USING gin (tsv);
     BEGIN
+        -- S4 fix: compute lists from expected row count.
+        -- sqrt(n) is the standard pgvector recommendation for ivfflat.
+        -- With no data yet, use a conservative default of 100.
         CREATE INDEX IF NOT EXISTS _memories_embedding_idx
             ON ask._memories USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 100);
+            WITH (lists = greatest(10, least(4000, 100)));
     EXCEPTION WHEN feature_not_supported THEN
         -- Older pgvector builds without ivfflat fall back to no ANN index.
         NULL;
@@ -190,8 +233,10 @@ END
 $$;
 
 -- Run it once now so the install-time table create still happens when
--- pgvector is already present at CREATE EXTENSION time.
-DO $bootstrap_memory$ BEGIN PERFORM ask._memory_bootstrap(); END $bootstrap_memory$;
+-- pgvector is already present at CREATE EXTENSION time. Uses the default
+-- 1536 dimensions; the Rust caller passes the GUC value on subsequent
+-- calls so operators can change models without hand-editing.
+DO $bootstrap_memory$ BEGIN PERFORM ask._memory_bootstrap(1536); END $bootstrap_memory$;
 
 -- User-defined tools registry. Operators register SQL snippets that the
 -- agent can invoke like built-in tools. Body is a SQL statement template
@@ -574,7 +619,8 @@ $$;
 REVOKE ALL ON ALL TABLES IN SCHEMA ask FROM PUBLIC;
 
 -- Read-only public surface. _memories is granted conditionally because
--- the table only exists when pgvector is installed.
+-- the table only exists when pgvector is installed. _traces uses RLS
+-- (S6 fix) so SELECT is granted to PUBLIC but rows are filtered by caller.
 GRANT SELECT ON ask._traces    TO PUBLIC;
 GRANT SELECT ON ask._tools     TO PUBLIC;
 GRANT SELECT ON ask._sql_audit TO PUBLIC;
@@ -598,7 +644,7 @@ REVOKE ALL ON FUNCTION ask._memory_insert(text, text, jsonb, text)              
 REVOKE ALL ON FUNCTION ask._memory_delete_owned(uuid)                                     FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._tool_register(text, jsonb, text)                              FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._tool_unregister(text)                                         FROM PUBLIC;
-REVOKE ALL ON FUNCTION ask._memory_bootstrap()                                            FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._memory_bootstrap(int)                                            FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._session_create(text)                                          FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._session_is_owned(uuid)                                        FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._session_fetch_messages(uuid)                                  FROM PUBLIC;
@@ -608,7 +654,7 @@ REVOKE ALL ON FUNCTION ask._session_touch(uuid)                                 
 REVOKE ALL ON FUNCTION ask._session_clear_messages(uuid)                                  FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._config_get(text)                                              FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._write_trace(jsonb)                                         TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._memory_bootstrap()                                         TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._memory_bootstrap(int)                                         TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._sql_audit_insert(text, int, bool, text)                    TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._sql_audit_finish(uuid, bigint, text)                       TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._memory_insert(text, text, jsonb, text)                     TO PUBLIC;

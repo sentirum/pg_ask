@@ -122,11 +122,63 @@ and includes:
   extension.
 * `ask._config_get(lookup_key)` SECURITY DEFINER helper for the
   internal `RuntimeConfig::load` read path.
+* `_traces` token-usage columns (`prompt_tokens`, `completion_tokens`).
+* `_traces` RLS policy (`caller = session_user`) — S6 fix.
+* `_write_trace` updated to persist token-usage data.
 * Matching `REVOKE / GRANT EXECUTE` policy.
 
-The Rust-side fixes (HP1, H13, HP2, ureq, thiserror) ship in the
-new `.so` and take effect the moment `ALTER EXTENSION UPDATE`
-swaps the library.
+The Rust-side fixes (HP1, H13, HP2, ureq, thiserror, plus the
+S2/P2/P3/P4/D6 hardening items below) ship in the new `.so` and take
+effect the moment `ALTER EXTENSION UPDATE` swaps the library.
+
+### Hardening fixes (code review follow-up)
+
+- **S2** — *`AskError` had no SQLSTATE — all errors surfaced as
+  `ERRCODE_INTERNAL_ERROR`.* Added `AskError::sql_error_code()` mapping
+  each variant to a meaningful PostgreSQL SQLSTATE (e.g.
+  `GuardRejected → 42501`, `InvalidConfig → 22023`,
+  `MaxIterations → 54000`). All `#[pg_extern]` entry points now use
+  `raise_as_pg_error()` instead of `pgrx::error!()` so monitoring tools
+  and `WHEN ... SQLSTATE ...` handlers can discriminate errors.
+
+- **S3/S4** — *`embedding_dimensions` hardcoded to 1536 and `lists = 100`
+  in bootstrap.* `_memory_bootstrap()` now accepts an explicit `dims int`
+  parameter (default 1536 for backward compatibility). The Rust caller
+  passes `pg_ask.embedding_dimensions` GUC value. On mismatch with an
+  existing table, the helper surfaces an actionable error with the ALTER
+  command. Index `lists` computed dynamically via `greatest(10, least(4000, N))`.
+
+- **S6** — *`_traces` had GRANT SELECT TO PUBLIC with no RLS.* Added
+  `ALTER TABLE ask._traces ENABLE ROW LEVEL SECURITY` + policy
+  `_traces_owner_select USING (caller = session_user)`. Superusers bypass
+  RLS per standard PG behaviour.
+
+- **P2** — *Embedding API had no retry/backoff.* All three embedding providers
+  (OpenAI, Voyage, Gemini) now retry transient failures (429, 5xx, transport)
+  with exponential backoff (base 200ms × 2^attempt, max 3 retries) and jitter.
+  Non-retriable errors (4xx other than 429, JSON parse failures) surface
+  immediately.
+
+- **P3** — *User-defined tools loaded via SPI on every `ask()` call.*
+  Added per-backend thread-local TTL cache (5s, user-keyed). Cache miss
+  triggers the existing SPI query; cache hit skips the round-trip.
+
+- **P4** — *Token usage not tracked.* `ProviderResponse` now carries an
+  optional `TokenUsage { prompt_tokens, completion_tokens }` populated
+  from each provider's `usage` response field. The agent loop accumulates
+  totals across iterations and writes them to `_traces` via two new
+  columns (`prompt_tokens int`, `completion_tokens int`).
+
+- **D6** — *Empty tool calls caused hard error.* Instead of
+  `AskError::EmptyResponse`, the loop now checks for text content first
+  (returns it if present) or sends a nudge message giving the model a
+  self-correction opportunity.
+
+- **O3** — *`rust-version` missing from Cargo.toml.* Added
+  `rust-version = "1.82"` matching pgrx 0.18's minimum.
+
+- **Dependency refresh** — pgrx `=0.18.0` → `=0.18.1` and 17 transitive
+  packages updated to latest compatible versions. Zero audit findings.
 
 ## [0.5.2] — 2026-05-25 — Hardening release
 

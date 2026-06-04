@@ -28,13 +28,16 @@ SELECT ask.sql('top 5 customers by lifetime revenue');
 > Postgres ties a GUC namespace to the extension name, not its install
 > schema.
 
-> **Status:** v0.5.2 — hardening release. v0.5 feature set
+> **Status:** v0.5.3 — regression-fix release for the v0.5.2 hardening sweep. v0.5 feature set
 > (Anthropic + OpenAI + Gemini chat, OpenAI / Voyage / Gemini embeddings,
 > pgvector-backed long-term memory, multi-turn sessions, audit log,
 > agent loop, readonly SQL tool, HTTP fetch with SSRF defence,
 > sample-table + user-defined tools, RLS-aware schema dump, column
 > redaction, streaming SRF, real SQL parser) **plus** 25 security /
-> correctness / performance fixes across three review waves. End-to-end
+> correctness / performance fixes across three review waves, **plus** 10 additional
+> hardening fixes in v0.5.3 (SQLSTATE-aware errors, token usage tracking,
+> embedding retry/backoff, _traces RLS, dynamic embedding dimensions,
+> user-tool caching, soft empty-response recovery). End-to-end
 > verified against a live PG18 backend with ZAI GLM-5.1 over the
 > Anthropic-compatible endpoint, including a four-turn `ask.chat`
 > anaphora canary. 75/75 tests green. See [`CHANGELOG.md`](CHANGELOG.md).
@@ -172,15 +175,15 @@ cargo pgrx install --release --features pg18    # writes into $PGHOME/lib
 psql -c 'CREATE EXTENSION pg_ask;'
 ```
 
-### Upgrade from 0.5.1
+### Upgrade from 0.5.2
 
 ```sql
-ALTER EXTENSION pg_ask UPDATE TO '0.5.2';
+ALTER EXTENSION pg_ask UPDATE TO '0.5.3';
 ```
 
-No public-surface changes; the script reapplies the SECURITY DEFINER
-writer helpers, the table-level lockdown, and the
-`ask._sql_audit.latency_ms` column. See [`CHANGELOG.md`](CHANGELOG.md).
+No public-surface changes. The upgrade script adds `_traces` token-usage columns,
+enables RLS on `_traces`, and refreshes the SECURITY DEFINER writer helpers.
+See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Quickstart — choose a provider
 
@@ -296,6 +299,7 @@ the production hardening checklist.
 ```sql
 -- Every ask.ask / sql / preview / chat call lands a row
 SELECT ts, kind, provider, model, iterations, latency_ms,
+       prompt_tokens, completion_tokens,
        substring(question for 60) AS q
 FROM ask._traces
 ORDER BY ts DESC LIMIT 20;
@@ -311,12 +315,12 @@ ORDER BY ts DESC LIMIT 20;
 ## Docs
 
 - [`CHANGELOG.md`](CHANGELOG.md) — release-by-release diff, including the
-  full v0.5.2 hardening list.
+  full v0.5.2 and v0.5.3 hardening lists.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — module layout, layering
   rules, request lifecycle, trait contracts, configuration table.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model, defence layers,
   production hardening checklist.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone plan, v0.1 → v0.5.2,
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone plan, v0.1 → v0.5.3,
   what's next.
 
 ## License

@@ -35,6 +35,9 @@ pub struct AgentOutcome {
     pub iterations: u32,
     pub tool_calls: Vec<ToolCallTrace>,
     pub new_turns: Vec<crate::providers::Message>,
+    /// P4 fix: accumulated token usage across all provider calls.
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
 }
 
 /// Single-shot entry: no prior conversation, no persistence.
@@ -110,6 +113,8 @@ pub fn run_with_cfg(
         content: MessageContent::Text(question.to_string()),
     });
     let mut tool_trace: Vec<ToolCallTrace> = Vec::new();
+    let mut total_prompt_tokens: i64 = 0;
+    let mut total_completion_tokens: i64 = 0;
 
     for iteration in 0..cfg.max_iterations {
         // Cooperative cancellation — lets `pg_cancel_backend` interrupt long loops.
@@ -117,7 +122,13 @@ pub fn run_with_cfg(
 
         let resp = provider.complete(&system_prompt, &history, &specs)?;
         match resp {
-            ProviderResponse::Final { text } => {
+            ProviderResponse::Final { text, usage } => {
+                // P4: accumulate token usage from this final response.
+                if let Some(u) = usage {
+                    total_prompt_tokens += u.prompt_tokens;
+                    total_completion_tokens += u.completion_tokens;
+                }
+
                 // Append the final assistant message so it gets persisted
                 // along with the rest of this turn's history slice.
                 history.push(Message {
@@ -130,20 +141,56 @@ pub fn run_with_cfg(
                     iterations: iteration + 1,
                     tool_calls: tool_trace,
                     new_turns,
+                    prompt_tokens: total_prompt_tokens,
+                    completion_tokens: total_completion_tokens,
                 });
             }
 
-            ProviderResponse::ToolCalls { text, calls } => {
+            ProviderResponse::ToolCalls { text: tool_text, calls, usage } => {
+                // P4: accumulate token usage from this tool-call response.
+                if let Some(u) = usage {
+                    total_prompt_tokens += u.prompt_tokens;
+                    total_completion_tokens += u.completion_tokens;
+                }
                 history.push(Message {
                     role: Role::Assistant,
                     content: MessageContent::AssistantWithTools {
-                        text,
+                        text: tool_text.clone(),
                         tool_calls: calls.clone(),
                     },
                 });
 
                 if calls.is_empty() {
-                    return Err(AskError::EmptyResponse);
+                    // D6 fix: instead of a hard error, give the model a
+                    // chance to self-correct. Return the final text if
+                    // the model produced any; otherwise add a nudge to
+                    // history so the next iteration tries harder.
+                    if let Some(ref t) = tool_text {
+                        if !t.is_empty() {
+                            history.push(Message {
+                                role: Role::Assistant,
+                                content: MessageContent::Text(t.clone()),
+                            });
+                            let new_turns = history.split_off(prior_len);
+                            return Ok(AgentOutcome {
+                                text: t.clone(),
+                                iterations: iteration + 1,
+                                tool_calls: tool_trace,
+                                new_turns,
+                                prompt_tokens: total_prompt_tokens,
+                                completion_tokens: total_completion_tokens,
+                            });
+                        }
+                    }
+                    // No text and no tool calls — nudge the model.
+                    history.push(Message {
+                        role: Role::User,
+                        content: MessageContent::Text(
+                            "You returned no tool calls and no answer. \
+                             Please respond with your final answer now.".into(),
+                        ),
+                    });
+                    continue;
                 }
 
                 for call in calls {

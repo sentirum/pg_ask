@@ -11,7 +11,7 @@
 //! SELECT * FROM ask.list_tools();
 //! ```
 
-use crate::infra::errors::AskError;
+use crate::infra::errors::{raise_as_pg_error, AskError};
 use pgrx::prelude::*;
 
 /// Register a new user-defined tool. The body may contain `{{key}}`
@@ -19,11 +19,15 @@ use pgrx::prelude::*;
 #[pg_extern(schema = "ask", volatile, parallel_unsafe)]
 fn register_tool(name: &str, spec: pgrx::Json, body: &str) -> bool {
     if name.is_empty() || body.is_empty() {
-        error!("ask.register_tool: name and body are required");
+        pgrx::ereport!(
+            pgrx::PgLogLevel::ERROR,
+            pgrx::PgSqlErrorCode::ERRCODE_SYNTAX_ERROR,
+            format_args!("ask.register_tool: name and body are required")
+        );
     }
     match do_register(name, spec.0, body) {
         Ok(_) => true,
-        Err(e) => error!("ask.register_tool: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     }
 }
 
@@ -46,7 +50,7 @@ fn do_register(name: &str, spec: serde_json::Value, body: &str) -> Result<(), As
 fn unregister_tool(name: &str) -> bool {
     match do_unregister(name) {
         Ok(b) => b,
-        Err(e) => error!("ask.unregister_tool: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     }
 }
 
@@ -63,7 +67,7 @@ fn do_unregister(name: &str) -> Result<bool, AskError> {
 fn list_tools() -> TableIterator<'static, (name!(name, String), name!(spec, pgrx::Json))> {
     let rows = match do_list() {
         Ok(r) => r,
-        Err(e) => error!("ask.list_tools: {e}"),
+        Err(e) => raise_as_pg_error(&e),
     };
     let materialised: Vec<_> = rows.into_iter().map(|(n, s)| (n, pgrx::Json(s))).collect();
     TableIterator::new(materialised.into_iter())
