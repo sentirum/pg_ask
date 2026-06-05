@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "pg_ask"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "pgrx",
  "pgrx-tests",

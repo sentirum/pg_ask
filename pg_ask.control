@@ -1,5 +1,5 @@
 comment = 'Agent-driven natural language interface for PostgreSQL'
-default_version = '0.5.3'
+default_version = '0.5.4'
 module_pathname = '$libdir/pg_ask'
 # Do NOT set `schema = 'ask'` here. pgrx already emits an explicit
 # `CREATE SCHEMA IF NOT EXISTS ask` plus fully-qualified `ask.*`

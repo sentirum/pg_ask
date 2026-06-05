@@ -11,6 +11,7 @@ Cargo.lock.bak
 # explicit negation here).
 /sql/pg_ask--*.sql
 !/sql/pg_ask--0.5.1--0.5.2.sql
+!/sql/pg_ask--0.5.3--0.5.4.sql
 /target-*
 
 # Editor

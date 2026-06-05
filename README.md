@@ -28,7 +28,9 @@ SELECT ask.sql('top 5 customers by lifetime revenue');
 > Postgres ties a GUC namespace to the extension name, not its install
 > schema.
 
-> **Status:** v0.5.3 — regression-fix release for the v0.5.2 hardening sweep. v0.5 feature set
+> **Status:** v0.5.4 — additive release adding the `ask.status()` capability
+> handshake (`api_level = 1`) for external orchestrators, on top of the v0.5.3
+> hardening release. v0.5 feature set
 > (Anthropic + OpenAI + Gemini chat, OpenAI / Voyage / Gemini embeddings,
 > pgvector-backed long-term memory, multi-turn sessions, audit log,
 > agent loop, readonly SQL tool, HTTP fetch with SSRF defence,
@@ -175,15 +177,17 @@ cargo pgrx install --release --features pg18    # writes into $PGHOME/lib
 psql -c 'CREATE EXTENSION pg_ask;'
 ```
 
-### Upgrade from 0.5.2
+### Upgrade to 0.5.4
 
 ```sql
-ALTER EXTENSION pg_ask UPDATE TO '0.5.3';
+ALTER EXTENSION pg_ask UPDATE TO '0.5.4';
 ```
 
-No public-surface changes. The upgrade script adds `_traces` token-usage columns,
-enables RLS on `_traces`, and refreshes the SECURITY DEFINER writer helpers.
-See [`CHANGELOG.md`](CHANGELOG.md).
+Additive release: adds the `ask.status()` capability handshake
+(`api_level = 1`) and `ask.status_api_level()`. No table, GUC, or
+existing-signature changes; the SQL upgrade script is a documented no-op
+(the new functions ship in the library and are granted to PUBLIC by the
+generated schema). See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Quickstart — choose a provider
 

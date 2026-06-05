@@ -90,6 +90,7 @@ RUN mkdir -p /staging/lib /staging/extension \
     && cp /usr/share/postgresql/${PG_MAJOR}/extension/pg_ask.control \
           /usr/share/postgresql/${PG_MAJOR}/extension/pg_ask*.sql \
           /staging/extension/ \
+    && (cp sql/pg_ask--0.5.3--0.5.4.sql /staging/extension/ 2>/dev/null || true) \
     && (cp sql/pg_ask--0.5.2--0.5.3.sql /staging/extension/ 2>/dev/null || true) \
     && (cp sql/pg_ask--0.5.1--0.5.2.sql /staging/extension/ 2>/dev/null || true)
 

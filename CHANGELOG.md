@@ -9,7 +9,19 @@ treats internal Rust modules as private regardless of `pub` visibility.
 Upgrade scripts ship as `sql/pg_ask--<from>--<to>.sql` and run
 automatically under `ALTER EXTENSION pg_ask UPDATE`.
 
-## [Unreleased]
+## [0.5.4] — 2026-06-05 — Capability handshake for external orchestrators
+
+Additive, minor release. Adds a single self-describing introspection
+entry point so an external agent platform (senti-ai) can discover an
+install's readiness and configuration in one secret-free round-trip,
+plus a companion api-level probe. No table, GUC, or existing-signature
+changes; the whole feature ships in the Rust library and is granted to
+PUBLIC by the pgrx-generated schema. Upgrade with
+`ALTER EXTENSION pg_ask UPDATE TO '0.5.4';` (the SQL upgrade script is a
+documented no-op — the new functions are created by the generated
+schema). End-to-end verified from a live senti-ai build calling
+`ask_database` over ZAI GLM, exercising the answer / sql_only / chat
+modes and the needs_config → setup → ready flow.
 
 ### Added
 

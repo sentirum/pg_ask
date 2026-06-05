@@ -1,0 +1,26 @@
+-- pg_ask 0.5.3 → 0.5.4 upgrade.
+--
+-- Additive, minor release: introduces the capability handshake.
+--
+-- New public surface (shipped in the new .so, emitted automatically by
+-- pgrx into the extension schema):
+--
+--   * ask.status()            → jsonb   (STABLE, parallel_safe)
+--   * ask.status_api_level()  → int     (IMMUTABLE, parallel_safe)
+--
+-- Both are created by pgrx's generated schema with the default
+-- EXECUTE TO PUBLIC grant, which is exactly what we want: ask.status()
+-- is secret-free (it returns provider_configured as a boolean and never
+-- the api_key), so any role with USAGE on the ask schema may call it to
+-- discover readiness. No GRANT/REVOKE adjustment is required here.
+--
+-- There are no table-shape changes, no GUC changes, and no signature
+-- changes to existing ask.* functions in this release. The whole feature
+-- lives in the Rust library and takes effect the moment ALTER EXTENSION
+-- UPDATE swaps the .so and installs the new function entries.
+--
+-- This script is intentionally a documented no-op (idempotent): the
+-- function objects themselves are created by the pgrx-generated portion
+-- of the upgrade, not by hand-written SQL here.
+
+-- (no statements)
