@@ -25,7 +25,7 @@ use std::time::Instant;
 const TOOL_CACHE_TTL_SECS: u64 = 5;
 
 thread_local! {
-    static TOOL_CACHE: RefCell<Option<(std::string::String, Instant, Vec<user_defined::UserDefinedTool>)>> = RefCell::new(None);
+    static TOOL_CACHE: RefCell<Option<(std::string::String, Instant, Vec<user_defined::UserDefinedTool>)>> = const { RefCell::new(None) };
 }
 
 /// Result of executing a single tool call. Errors that the model should

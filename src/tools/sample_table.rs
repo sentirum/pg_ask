@@ -96,21 +96,19 @@ impl Tool for SampleTableTool {
             Some(s) => format!("{}.{}", quote_ident(s), quote_ident(table)),
             None => quote_ident(table),
         };
-        let query = format!(
-            "SELECT * FROM {} LIMIT {}",
-            qualified,
-            n
-        );
+        let query = format!("SELECT * FROM {qualified} LIMIT {n}");
 
         match run_sample(
             &query,
-            schema.unwrap_or(""),
-            table,
-            self.readonly,
-            n,
-            self.statement_timeout_ms,
-            &self.sensitive_columns,
-            &self.search_path,
+            SampleParams {
+                schema: schema.unwrap_or(""),
+                table,
+                readonly: self.readonly,
+                max_rows: n,
+                statement_timeout_ms: self.statement_timeout_ms,
+                sensitive: &self.sensitive_columns,
+                search_path: &self.search_path,
+            },
         ) {
             Ok(text) => Ok(ToolOutput {
                 text,
@@ -124,16 +122,29 @@ impl Tool for SampleTableTool {
     }
 }
 
-fn run_sample(
-    query: &str,
-    schema: &str,
-    table: &str,
+/// Grouped inputs for [`run_sample`]. Bundled into a struct so the helper
+/// keeps a two-argument signature (query + params) instead of a long
+/// positional list.
+struct SampleParams<'a> {
+    schema: &'a str,
+    table: &'a str,
     readonly: bool,
     max_rows: usize,
     statement_timeout_ms: u64,
-    sensitive: &[String],
-    search_path: &str,
-) -> std::result::Result<String, String> {
+    sensitive: &'a [String],
+    search_path: &'a str,
+}
+
+fn run_sample(query: &str, p: SampleParams<'_>) -> std::result::Result<String, String> {
+    let SampleParams {
+        schema,
+        table,
+        readonly,
+        max_rows,
+        statement_timeout_ms,
+        sensitive,
+        search_path,
+    } = p;
     // Audit row stays in the parent txn so it's visible even if the
     // subtxn aborts. Errors here are swallowed — audit is
     // best-effort and must never break the user's call. We discard

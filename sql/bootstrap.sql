@@ -413,7 +413,20 @@ $$;
 -- Consumer-side: stamp a delivered row as processed. Idempotent (only
 -- stamps rows still pending) and returns whether it changed anything, so a
 -- listener can tell a fresh delivery from a duplicate wake-up. SECURITY
--- DEFINER because the consumer role need not own the table.
+-- DEFINER because the designated consumer role need not own the table.
+--
+-- Deliberately NOT filtered by emitter: the consumer (e.g. a senti
+-- listener) almost always connects as a DIFFERENT role than the one that
+-- emitted the event (a trigger fires as the app role; the listener uses a
+-- dedicated reader DSN). An `emitter = session_user` filter would make the
+-- consumer unable to stamp those rows, causing infinite re-delivery. The
+-- consumer is by design the single trusted drain for the whole outbox.
+--
+-- Suppression protection (a rogue role pre-marking events to hide alerts)
+-- is an operator concern, handled the same way as the rest of pg_ask's
+-- write surface: in a multi-tenant / untrusted-caller database, REVOKE
+-- EXECUTE on this helper from PUBLIC after CREATE EXTENSION and GRANT it
+-- only to the consumer role. See docs/SECURITY.md.
 CREATE OR REPLACE FUNCTION ask._outbox_mark_processed(
     outbox_id uuid
 ) RETURNS boolean

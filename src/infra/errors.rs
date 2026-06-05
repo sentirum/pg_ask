@@ -56,7 +56,7 @@ impl Clone for AskError {
         match self {
             Self::MissingConfig(k) => Self::MissingConfig(k),
             Self::InvalidConfig { key, message } => Self::InvalidConfig {
-                key: *key,
+                key,
                 message: message.clone(),
             },
             Self::UnsupportedProvider(p) => Self::UnsupportedProvider(p.clone()),
