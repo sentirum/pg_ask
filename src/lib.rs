@@ -330,6 +330,39 @@ mod tests {
         assert_eq!(v.as_deref(), Some(env!("CARGO_PKG_VERSION")));
     }
 
+    #[pg_test]
+    fn status_handshake_reports_shape_without_secrets() {
+        // Unconfigured install: must NOT raise, must report not-ready.
+        let raw: Option<pgrx::Json> = Spi::get_one("SELECT ask.status()").unwrap();
+        let doc = raw.expect("status() returns a row").0;
+
+        assert_eq!(doc["extension"], "pg_ask");
+        assert_eq!(doc["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(doc["api_level"], 1);
+        // No provider yet → not configured → not ready, health needs_config.
+        assert_eq!(doc["provider_configured"], false);
+        assert_eq!(doc["ready"], false);
+        assert_eq!(doc["health"], "needs_config");
+        // Secret never surfaces, in any form.
+        let flat = doc.to_string();
+        assert!(!flat.contains("api_key"));
+        assert!(doc.get("capabilities").unwrap().is_array());
+
+        // After configuring the fixture provider, it flips to ready.
+        Spi::run("SET pg_ask.provider = 'fixture'").unwrap();
+        let raw2: Option<pgrx::Json> = Spi::get_one("SELECT ask.status()").unwrap();
+        let doc2 = raw2.unwrap().0;
+        assert_eq!(doc2["provider_configured"], true);
+        assert_eq!(doc2["provider"], "fixture");
+        assert_eq!(doc2["ready"], true);
+    }
+
+    #[pg_test]
+    fn status_api_level_matches_constant() {
+        let n: Option<i32> = Spi::get_one("SELECT ask.status_api_level()").unwrap();
+        assert_eq!(n, Some(1));
+    }
+
     /// Configure every fixture-driven test the same way: pick the
     /// fixture provider, point at a scenario, and turn telemetry off
     /// because the SECURITY DEFINER writer assumes the extension

@@ -7,6 +7,7 @@ pub mod config;
 pub mod errors;
 pub mod http;
 pub mod spi;
+pub mod status;
 // `subtxn` is the single module allowed to use raw `pgrx_pg_sys` FFI.
 // See its module-level docs for the policy exemption rationale and
 // the invariant list every change must preserve.

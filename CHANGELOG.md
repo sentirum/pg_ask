@@ -9,6 +9,21 @@ treats internal Rust modules as private regardless of `pub` visibility.
 Upgrade scripts ship as `sql/pg_ask--<from>--<to>.sql` and run
 automatically under `ALTER EXTENSION pg_ask UPDATE`.
 
+## [Unreleased]
+
+### Added
+
+- **`ask.status()` capability handshake** (`api_level = 1`). A single,
+  secret-free, never-raising JSON entry point that lets an external
+  orchestrator (e.g. senti-ai) discover in one round-trip whether the
+  install is `ready`, only `needs_config`, or lacks schema access — plus
+  `version`, `provider` (name only, never the key), `model`, `readonly`,
+  `memory_available`, `capabilities`, and `limits`. Granted to PUBLIC
+  because it returns `provider_configured` as a boolean and never the
+  api_key. Companion `ask.status_api_level()` returns the integer contract
+  version for cheap shape-gating. New module `src/infra/status.rs` holds
+  the snapshot logic; `src/api/status.rs` is the thin wrapper.
+
 ## [0.5.3] — 2026-05-26 — Regression-fix release for v0.5.2 hardening
 
 A single-purpose patch release. v0.5.2's hardening sweep introduced
