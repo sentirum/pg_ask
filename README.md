@@ -28,7 +28,9 @@ SELECT ask.sql('top 5 customers by lifetime revenue');
 > Postgres ties a GUC namespace to the extension name, not its install
 > schema.
 
-> **Status:** v0.5.5 — agent-loop efficiency release: pinned `search_path`,
+> **Status:** v0.5.6 — adds the `ask.emit()` event outbox for reverse
+> notifications (ADR-0017), on top of the v0.5.5 agent-loop efficiency
+> release: pinned `search_path`,
 > bare-name prompting, higher iteration ceiling, graceful budget
 > finalisation. Builds on the v0.5.4 `ask.status()` capability
 > handshake (`api_level = 1`) for external orchestrators, on top of the v0.5.3
@@ -179,7 +181,18 @@ cargo pgrx install --release --features pg18    # writes into $PGHOME/lib
 psql -c 'CREATE EXTENSION pg_ask;'
 ```
 
-### Upgrade to 0.5.5
+### Upgrade to 0.5.6
+
+```sql
+ALTER EXTENSION pg_ask UPDATE TO '0.5.6';
+```
+
+Adds the event outbox (`ask._outbox` + `ask.emit()`) for reverse
+notifications (ADR-0017). Opt-in via `pg_ask.events_enabled`. The upgrade
+script creates the table + writer helpers; the `ask.emit` function ships in
+the library. See [`CHANGELOG.md`](CHANGELOG.md).
+
+#### Earlier: 0.5.5
 
 ```sql
 ALTER EXTENSION pg_ask UPDATE TO '0.5.5';
@@ -380,7 +393,7 @@ carrying its own provider config inside the database.
   rules, request lifecycle, trait contracts, configuration table.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model, defence layers,
   production hardening checklist.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone plan, v0.1 → v0.5.5,
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone plan, v0.1 → v0.5.6,
   what's next.
 
 ## License

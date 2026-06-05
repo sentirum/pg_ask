@@ -9,7 +9,19 @@ treats internal Rust modules as private regardless of `pub` visibility.
 Upgrade scripts ship as `sql/pg_ask--<from>--<to>.sql` and run
 automatically under `ALTER EXTENSION pg_ask UPDATE`.
 
-## [Unreleased]
+## [0.5.6] — 2026-06-06 — Event outbox for reverse notifications
+
+Adds the pg_ask side of pg_ask → senti reverse alerting (ADR-0017): a
+durable event outbox plus `ask.emit()`, so triggers / scheduled jobs can
+report in-database conditions to an external orchestrator. pg_ask stays
+ignorant of the consumer — it only deposits events in its own database;
+who listens decides ownership, which keeps multi-tenant isolation
+automatic. Opt-in via `pg_ask.events_enabled` (default off). Upgrade with
+`ALTER EXTENSION pg_ask UPDATE TO '0.5.6';` — unlike 0.5.4/0.5.5 the SQL
+upgrade script creates real objects (the `ask._outbox` table + writer
+helpers). Verified live end-to-end against the demo DB, including a DB
+trigger emitting a low-stock alert that a senti listener drained, and the
+cross-role consumer path (emitter ≠ consumer). 90 pg_tests green.
 
 ### Added — event outbox for reverse notifications (ADR-0017)
 
