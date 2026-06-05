@@ -11,6 +11,29 @@ automatically under `ALTER EXTENSION pg_ask UPDATE`.
 
 ## [Unreleased]
 
+### Changed — token & latency optimization (schema resolution)
+
+- **Pin `search_path` to the introspected schemas before every tool query.**
+  The agent now derives the active schema set from the schema dump and
+  applies `SET LOCAL search_path = "…"` inside each `sql_query` /
+  `sample_table` subtransaction. Bare table names from the model resolve
+  no matter which schema they live in, so the model no longer has to
+  discover or guess schemas. Identifiers are double-quote escaped; the
+  clause is scoped to the subtxn so it never leaks into the surrounding
+  transaction, and readonly enforcement is unaffected.
+- **Prompt: tell the model the search_path is set and to use BARE table
+  names.** The schema-adjacent hint now says the path is already configured
+  and to reference tables as `orders` (never `public.orders` or
+  `schema.orders`), since a qualified `public.x` would bypass the pin. This
+  pairs with the pin above to remove the single biggest iteration sink.
+- **`sample_table.schema` is now optional.** Omitting it samples a bare
+  table name via the pinned path instead of forcing the model to supply
+  (and often mis-guess) a schema.
+- **Measured impact** on a multi-schema demo DB: schema-discovery queries
+  (`information_schema` / `pg_tables` probing) dropped from ~55% of all
+  tool calls to ~10%; complex multi-table questions that previously took
+  7–16 iterations now answer in ~3 when the search_path is sane.
+
 ### Changed — agent-loop efficiency & resilience
 
 - **Prompt: stop wasting iterations on schema discovery.** The system

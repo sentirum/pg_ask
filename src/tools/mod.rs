@@ -63,12 +63,14 @@ pub fn default_toolset(
     include_describe_table: bool,
     include_memory: bool,
     http: HttpClient,
+    search_path: &str,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(sql_query::SqlQueryTool {
         readonly: cfg.readonly,
         max_rows: cfg.tool_max_rows,
         statement_timeout_ms: cfg.tool_statement_timeout_ms,
         sensitive_columns: cfg.sensitive_columns.clone(),
+        search_path: search_path.to_string(),
     })];
     if include_describe_table {
         tools.push(Box::new(describe_table::DescribeTableTool));
@@ -97,6 +99,7 @@ pub fn default_toolset(
         max_rows: cfg.tool_max_rows,
         statement_timeout_ms: cfg.tool_statement_timeout_ms,
         sensitive_columns: cfg.sensitive_columns.clone(),
+        search_path: search_path.to_string(),
     }));
     // Append any user-defined tools registered by the caller. HP1
     // (Gemini v0.5.2 review item 1.2): each tool carries the same

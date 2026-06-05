@@ -75,5 +75,60 @@ pub fn build(schema_text: &str, mode: AgentMode, readonly: bool) -> String {
 
     s.push_str("\n=== DATABASE SCHEMA ===\n");
     s.push_str(schema_text);
+
+    // Final, schema-adjacent reminder. LLMs weight the instruction nearest
+    // the data most heavily, and the most expensive recurring mistake is
+    // assuming `public`. List the actual schemas in play right after the
+    // dump so the model qualifies its first query correctly instead of
+    // probing `public.*`, finding nothing, and re-discovering the catalog.
+    if matches!(mode, AgentMode::Execute) {
+        let schemas = crate::schema::distinct_schemas(schema_text);
+        if !schemas.is_empty() {
+            s.push_str("\n=== HOW TO REFERENCE TABLES ===\n");
+            // The agent loop pins `search_path` to exactly these schemas
+            // before each query (see schema::search_path_clause), so BARE
+            // table names always resolve. Telling the model to use bare
+            // names is the reliable instruction: a qualified `public.x`
+            // would bypass the pinned path and fail, whereas a bare `x`
+            // resolves no matter which schema it lives in. This removes the
+            // single biggest source of wasted iterations.
+            s.push_str(
+                "The search_path is ALREADY set for you to the correct \
+                 schema(s). Use BARE table names exactly as written above \
+                 (e.g. `orders`, not `public.orders` and not \
+                 `schema.orders`). Do NOT prefix tables with a schema, do \
+                 NOT assume `public`, and do NOT query information_schema or \
+                 pg_catalog to find tables — they are all listed above.\n",
+            );
+            if schemas.len() > 1 {
+                s.push_str(&format!(
+                    "(If two schemas define the same table name, then and \
+                     only then qualify it; the active schemas are: {}.)\n",
+                    schemas.join(", ")
+                ));
+            }
+        }
+    }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_schema_hint_is_emitted() {
+        let dump = "TABLE shop.orders\n  id int\n";
+        let p = build(dump, AgentMode::Execute, true);
+        assert!(p.contains("HOW TO REFERENCE TABLES"));
+        assert!(p.contains("BARE table names"));
+        assert!(p.contains("search_path is ALREADY set"));
+    }
+
+    #[test]
+    fn generate_only_mode_skips_schema_hint() {
+        let dump = "TABLE shop.orders\n  id int\n";
+        let p = build(dump, AgentMode::GenerateOnly, true);
+        assert!(!p.contains("HOW TO REFERENCE TABLES"));
+    }
 }

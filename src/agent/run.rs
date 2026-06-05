@@ -98,9 +98,13 @@ pub fn run_with_cfg(
         && cfg.embedding_api_key.is_some()
         && crate::memory::store::pgvector_installed().unwrap_or(false);
 
+    // Pin search_path to the introspected schemas so the model's queries
+    // resolve even if it forgets to qualify or assumes `public` — this is
+    // the single biggest source of wasted iterations on multi-schema DBs.
+    let search_path = schema::search_path_clause(&schema_summary.text);
     let tools_vec: Vec<Box<dyn Tool>> = match mode {
         AgentMode::Execute => {
-            tools::default_toolset(cfg, need_describe, memory_ready, http.clone())
+            tools::default_toolset(cfg, need_describe, memory_ready, http.clone(), &search_path)
         }
         AgentMode::GenerateOnly => Vec::new(),
     };

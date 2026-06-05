@@ -27,6 +27,9 @@ pub struct SampleTableTool {
     pub max_rows: usize,
     pub statement_timeout_ms: u64,
     pub sensitive_columns: Vec<String>,
+    /// Pinned `search_path` (see `schema::search_path_clause`) so a bare or
+    /// `public`-assumed table name resolves to the real schema.
+    pub search_path: String,
 }
 
 impl Tool for SampleTableTool {
@@ -40,32 +43,38 @@ impl Tool for SampleTableTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "schema": {
-                        "type": "string",
-                        "description": "Schema name (e.g. public)."
-                    },
                     "table": {
                         "type": "string",
-                        "description": "Table name."
+                        "description": "Bare table name as listed in the schema \
+                            (e.g. `orders`). The search_path is already set, so \
+                            do NOT add a schema prefix."
+                    },
+                    "schema": {
+                        "type": "string",
+                        "description": "Optional. Only needed to disambiguate a \
+                            table name that exists in multiple schemas. Omit \
+                            otherwise."
                     },
                     "n": {
                         "type": "integer",
                         "description": "Number of rows to sample (1–10, default 3)."
                     }
                 },
-                "required": ["schema", "table"]
+                "required": ["table"]
             }),
         }
     }
 
     fn invoke(&self, args: &serde_json::Value) -> Result<ToolOutput> {
+        // `schema` is OPTIONAL: when omitted (or empty), we rely on the
+        // pinned search_path to resolve a bare table name. This stops the
+        // model from having to guess `public` and lets a bare name from the
+        // schema dump just work.
         let schema = args
             .get("schema")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| AskError::Tool {
-                name: "sample_table".to_string(),
-                message: "missing required argument `schema`".into(),
-            })?;
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let table = args
             .get("table")
             .and_then(|v| v.as_str())
@@ -81,21 +90,27 @@ impl Tool for SampleTableTool {
             .clamp(1, MAX_SAMPLE_ROWS)
             .min(self.max_rows);
 
+        // Qualify only when the model gave a schema; otherwise emit a bare
+        // name and let the pinned search_path route it.
+        let qualified = match schema {
+            Some(s) => format!("{}.{}", quote_ident(s), quote_ident(table)),
+            None => quote_ident(table),
+        };
         let query = format!(
-            "SELECT * FROM {}.{} LIMIT {}",
-            quote_ident(schema),
-            quote_ident(table),
+            "SELECT * FROM {} LIMIT {}",
+            qualified,
             n
         );
 
         match run_sample(
             &query,
-            schema,
+            schema.unwrap_or(""),
             table,
             self.readonly,
             n,
             self.statement_timeout_ms,
             &self.sensitive_columns,
+            &self.search_path,
         ) {
             Ok(text) => Ok(ToolOutput {
                 text,
@@ -117,6 +132,7 @@ fn run_sample(
     max_rows: usize,
     statement_timeout_ms: u64,
     sensitive: &[String],
+    search_path: &str,
 ) -> std::result::Result<String, String> {
     // Audit row stays in the parent txn so it's visible even if the
     // subtxn aborts. Errors here are swallowed — audit is
@@ -150,6 +166,7 @@ fn run_sample(
     // sql_query::run_query_to_text; see that file's docs for the
     // full motivation.
     let timeout_sql = format!("SET LOCAL statement_timeout = {statement_timeout_ms}");
+    let search_path_owned = search_path.to_string();
     let query_owned = query.to_string();
     let max_rows_copy = max_rows;
     let expanded_clone = expanded.clone();
@@ -159,6 +176,12 @@ fn run_sample(
                 client
                     .update(timeout_sql.as_str(), None, &[])
                     .map_err(|e| crate::infra::errors::AskError::Sql(e.to_string()))?;
+                if !search_path_owned.is_empty() {
+                    let sp_sql = format!("SET LOCAL search_path = {search_path_owned}");
+                    client
+                        .update(sp_sql.as_str(), None, &[])
+                        .map_err(|e| crate::infra::errors::AskError::Sql(e.to_string()))?;
+                }
                 if readonly {
                     client
                         .update("SET LOCAL transaction_read_only = on", None, &[])

@@ -31,6 +31,56 @@ pub struct SchemaSummary {
     pub mode: SchemaMode,
 }
 
+/// Extract the distinct schema names from a rendered schema dump, in
+/// first-seen order. Both render modes prefix every table with
+/// `schema.table` (full mode as `TABLE schema.table`, compact mode as a
+/// leading `schema.table` token), so the same scan works for both.
+///
+/// Used in two places:
+///  - the system prompt, to tell the model which schemas are in play, and
+///  - the agent loop, to pin `search_path` so the model's queries resolve
+///    even if it forgets to qualify (or mis-qualifies as `public`).
+pub fn distinct_schemas(schema_text: &str) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for raw in schema_text.lines() {
+        let line = raw.trim_start();
+        let candidate = line.strip_prefix("TABLE ").unwrap_or(line);
+        let token = candidate.split_whitespace().next().unwrap_or("");
+        if let Some((schema, rest)) = token.split_once('.') {
+            if !schema.is_empty() && !rest.is_empty() && !schema.contains(' ') {
+                let owned = schema.to_string();
+                if !seen.contains(&owned) {
+                    seen.push(owned);
+                }
+            }
+        }
+    }
+    seen
+}
+
+/// Build a safe `search_path` clause value from a rendered schema dump:
+/// every introspected schema (double-quoted to survive odd identifiers),
+/// with `public` appended as a fallback. Returns an empty string when the
+/// dump exposes no schemas, in which case callers leave search_path alone.
+///
+/// Identifiers are quoted with the standard `"x"` form and any embedded
+/// double-quote is doubled (`"` -> `""`), so the result is safe to splice
+/// into `SET LOCAL search_path = ...`. The schema names themselves come
+/// from `pg_namespace` via introspection, not from user input.
+pub fn search_path_clause(schema_text: &str) -> String {
+    let mut parts: Vec<String> = distinct_schemas(schema_text)
+        .into_iter()
+        .map(|s| format!("\"{}\"", s.replace('"', "\"\"")))
+        .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    if !parts.iter().any(|p| p == "\"public\"") {
+        parts.push("\"public\"".to_string());
+    }
+    parts.join(", ")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemaMode {
     Full,
@@ -152,4 +202,56 @@ fn compute_summary(char_budget: usize) -> Result<SchemaSummary> {
         text: compact,
         mode: SchemaMode::Compact,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::distinct_schemas;
+
+    #[test]
+    fn distinct_schemas_full_mode() {
+        let dump = "TABLE shop.orders -- customer orders\n  \
+                    order_id int NOT NULL\n  customer_id int\n\
+                    TABLE shop.customers\n  customer_id int\n\
+                    TABLE analytics.events\n  event_id int\n";
+        assert_eq!(distinct_schemas(dump), vec!["shop", "analytics"]);
+    }
+
+    #[test]
+    fn distinct_schemas_compact_mode() {
+        let dump = "TABLES (use describe_table for columns):\n  \
+                    shop.orders   (7 columns)\n  shop.customers  (6 columns)\n";
+        assert_eq!(distinct_schemas(dump), vec!["shop"]);
+    }
+
+    #[test]
+    fn distinct_schemas_ignores_column_lines() {
+        let dump = "TABLE public.users\n  id uuid NOT NULL\n  \
+                    email text\n  created_at timestamptz\n";
+        assert_eq!(distinct_schemas(dump), vec!["public"]);
+    }
+
+    #[test]
+    fn search_path_clause_appends_public_fallback() {
+        let dump = "TABLE shop.orders\n  id int\n";
+        assert_eq!(super::search_path_clause(dump), "\"shop\", \"public\"");
+    }
+
+    #[test]
+    fn search_path_clause_no_double_public() {
+        let dump = "TABLE public.users\n  id int\n";
+        assert_eq!(super::search_path_clause(dump), "\"public\"");
+    }
+
+    #[test]
+    fn search_path_clause_empty_when_no_schema() {
+        assert_eq!(super::search_path_clause("(no user-visible tables found)"), "");
+    }
+
+    #[test]
+    fn search_path_clause_quotes_embedded_quote() {
+        let dump = "TABLE we\"ird.t\n  id int\n";
+        // embedded quote doubled, public appended
+        assert_eq!(super::search_path_clause(dump), "\"we\"\"ird\", \"public\"");
+    }
 }

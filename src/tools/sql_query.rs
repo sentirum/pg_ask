@@ -54,6 +54,11 @@ pub struct SqlQueryTool {
     pub max_rows: usize,
     pub statement_timeout_ms: u64,
     pub sensitive_columns: Vec<String>,
+    /// Comma-joined `search_path` to pin per query (e.g. `"shop, public"`),
+    /// derived from the introspected schema. Lets the model's unqualified
+    /// (or `public`-assumed) table references resolve without a round-trip
+    /// of catalog discovery. Empty string => leave search_path untouched.
+    pub search_path: String,
 }
 
 impl Tool for SqlQueryTool {
@@ -103,6 +108,7 @@ impl Tool for SqlQueryTool {
             self.max_rows,
             self.statement_timeout_ms,
             &self.sensitive_columns,
+            &self.search_path,
         ) {
             Ok(table) => Ok(ok(table)),
             Err(e) => Ok(err(&format!("query failed: {e}"))),
@@ -154,6 +160,7 @@ fn run_query_to_text(
     max_rows: usize,
     statement_timeout_ms: u64,
     sensitive: &[String],
+    search_path: &str,
 ) -> std::result::Result<String, String> {
     // Phase 1: audit insert (captures uuid). Stays in the parent
     // transaction — we WANT the in-flight row visible even if the
@@ -180,9 +187,10 @@ fn run_query_to_text(
     let query_owned = query.to_string();
     let max_rows_copy = max_rows;
     let timeout_ms = statement_timeout_ms;
+    let search_path_owned = search_path.to_string();
     let subtxn_result =
         crate::infra::subtxn::run_in_subtransaction(Some("pg_ask_sql_query"), move || {
-            apply_per_call_gucs(readonly, timeout_ms)?;
+            apply_per_call_gucs(readonly, timeout_ms, &search_path_owned)?;
             render::run_to_table(&query_owned, max_rows_copy, &sensitive_clone)
                 .map_err(crate::infra::errors::AskError::Sql)
         });
@@ -236,12 +244,25 @@ fn audit_insert_only(query: &str, readonly: bool) -> std::result::Result<Option<
 fn apply_per_call_gucs(
     readonly: bool,
     statement_timeout_ms: u64,
+    search_path: &str,
 ) -> crate::infra::errors::Result<()> {
     let timeout_sql = format!("SET LOCAL statement_timeout = {statement_timeout_ms}");
     Spi::connect_mut(|client| {
         client
             .update(timeout_sql.as_str(), None, &[])
             .map_err(|e| crate::infra::errors::AskError::Sql(e.to_string()))?;
+        // Pin search_path so the model's queries resolve against the real
+        // schemas even when it forgets to qualify or assumes `public`. The
+        // value is built from introspected schema names via
+        // `schema::search_path_clause`, which quotes each identifier, so it
+        // is safe to interpolate here. Empty => skip (don't override the
+        // session default).
+        if !search_path.is_empty() {
+            let sp_sql = format!("SET LOCAL search_path = {search_path}");
+            client
+                .update(sp_sql.as_str(), None, &[])
+                .map_err(|e| crate::infra::errors::AskError::Sql(e.to_string()))?;
+        }
         if readonly {
             client
                 .update("SET LOCAL transaction_read_only = on", None, &[])
