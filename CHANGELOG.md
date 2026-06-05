@@ -9,7 +9,19 @@ treats internal Rust modules as private regardless of `pub` visibility.
 Upgrade scripts ship as `sql/pg_ask--<from>--<to>.sql` and run
 automatically under `ALTER EXTENSION pg_ask UPDATE`.
 
-## [Unreleased]
+## [0.5.5] — 2026-06-05 — Agent-loop efficiency & schema-resolution optimization
+
+Performance-focused release. The dominant cost on multi-schema databases
+was the model probing `information_schema` / `pg_tables` and assuming the
+`public` schema to locate tables, which burned iterations (and on tight
+budgets, hit `agent exceeded max iterations`). This release pins
+`search_path` to the introspected schemas, teaches the model to use bare
+table names, raises the iteration ceiling, and finalises gracefully at the
+limit. All changes ship in the Rust library; the SQL upgrade script is a
+documented no-op (`ALTER EXTENSION pg_ask UPDATE TO '0.5.5'`). Verified
+live against a multi-schema demo DB over ZAI GLM: schema-discovery queries
+dropped ~55% → ~10% of tool calls and complex multi-table questions that
+took 7–16 iterations now answer in ~3. 86 pg_tests green.
 
 ### Changed — token & latency optimization (schema resolution)
 

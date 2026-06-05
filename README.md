@@ -28,7 +28,9 @@ SELECT ask.sql('top 5 customers by lifetime revenue');
 > Postgres ties a GUC namespace to the extension name, not its install
 > schema.
 
-> **Status:** v0.5.4 — additive release adding the `ask.status()` capability
+> **Status:** v0.5.5 — agent-loop efficiency release: pinned `search_path`,
+> bare-name prompting, higher iteration ceiling, graceful budget
+> finalisation. Builds on the v0.5.4 `ask.status()` capability
 > handshake (`api_level = 1`) for external orchestrators, on top of the v0.5.3
 > hardening release. v0.5 feature set
 > (Anthropic + OpenAI + Gemini chat, OpenAI / Voyage / Gemini embeddings,
@@ -177,7 +179,19 @@ cargo pgrx install --release --features pg18    # writes into $PGHOME/lib
 psql -c 'CREATE EXTENSION pg_ask;'
 ```
 
-### Upgrade to 0.5.4
+### Upgrade to 0.5.5
+
+```sql
+ALTER EXTENSION pg_ask UPDATE TO '0.5.5';
+```
+
+Performance release: pins `search_path` to the introspected schemas and
+teaches the model to use bare table names, cutting wasted schema-discovery
+iterations; raises `max_iterations` 16→ 24; finalises gracefully at the
+limit. All changes live in the library; the SQL upgrade script is a no-op.
+See [`CHANGELOG.md`](CHANGELOG.md).
+
+#### Earlier: 0.5.4
 
 ```sql
 ALTER EXTENSION pg_ask UPDATE TO '0.5.4';
@@ -366,7 +380,7 @@ carrying its own provider config inside the database.
   rules, request lifecycle, trait contracts, configuration table.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model, defence layers,
   production hardening checklist.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone plan, v0.1 → v0.5.4,
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone plan, v0.1 → v0.5.5,
   what's next.
 
 ## License

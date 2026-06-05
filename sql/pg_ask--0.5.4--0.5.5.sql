@@ -1,0 +1,21 @@
+-- pg_ask 0.5.4 → 0.5.5 upgrade.
+--
+-- Agent-loop / prompt optimization release. ALL changes ship in the Rust
+-- library (.so) and take effect the moment ALTER EXTENSION UPDATE swaps it:
+--
+--   * search_path is pinned to the introspected schemas before each tool
+--     query, so the model's bare table names resolve without catalog
+--     discovery;
+--   * the system prompt instructs the model to use bare table names and
+--     not to re-discover the schema;
+--   * max_iterations default raised 16 -> 24;
+--   * graceful finalisation at the iteration limit instead of a hard error.
+--
+-- There are NO changes to the SQL surface in this release: no new or
+-- changed `ask.*` function signatures, no `pg_ask.*` GUC additions, no
+-- `ask._*` table shape changes. (The max_iterations DEFAULT changed, but
+-- that is baked into the GUC registration in the library, not into SQL.)
+--
+-- This script is therefore an intentional, documented no-op.
+
+-- (no statements)
