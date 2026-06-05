@@ -33,6 +33,13 @@ pub static TOOL_STATEMENT_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(1
 pub static TOOL_MAX_ROWS: GucSetting<i32> = GucSetting::<i32>::new(200);
 pub static TRACE_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
+/// Master switch for the event outbox (ADR-0017). When `false`,
+/// `ask.emit()` is a no-op returning NULL, so an install that doesn't use
+/// reverse notifications pays nothing and exposes no channel. Default
+/// `false` (opt-in): emitting events is only useful when a listener (senti)
+/// is actually consuming them.
+pub static EVENTS_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 /// Soft cap on the schema dump injected into the system prompt, measured
 /// in characters (a rough proxy for tokens at ~4 chars/token).
 ///
@@ -115,6 +122,11 @@ pub struct RuntimeConfig {
     /// Picked up by the telemetry writer (no-op until v0.2).
     #[allow(dead_code)]
     pub trace_enabled: bool,
+    /// Snapshot of `pg_ask.events_enabled`. The emit path reads the GUC
+    /// directly (`EVENTS_ENABLED.get()`); this field exists for parity with
+    /// the rest of the config snapshot and future use.
+    #[allow(dead_code)]
+    pub events_enabled: bool,
     pub schema_char_budget: usize,
 
     // Embedding / memory snapshot. `embedding_*` are Options because the
@@ -176,6 +188,7 @@ impl RuntimeConfig {
             )?,
             tool_max_rows: usize::try_from(TOOL_MAX_ROWS.get().max(1)).unwrap_or(200),
             trace_enabled: TRACE_ENABLED.get(),
+            events_enabled: EVENTS_ENABLED.get(),
             schema_char_budget: usize::try_from(SCHEMA_CHAR_BUDGET.get().max(512))
                 .unwrap_or(16_000),
             embedding_provider: optional_string("embedding_provider", &EMBEDDING_PROVIDER),
@@ -292,6 +305,7 @@ const KNOWN_KEYS: &[&str] = &[
     "tool_statement_timeout_ms",
     "tool_max_rows",
     "trace_enabled",
+    "events_enabled",
     "schema_char_budget",
     "embedding_provider",
     "embedding_api_key",

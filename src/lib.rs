@@ -200,6 +200,14 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Userset,
         GucFlags::default(),
     );
+    GucRegistry::define_bool_guc(
+        c"pg_ask.events_enabled",
+        c"Enable ask.emit(): append to ask._outbox + pg_notify('pg_ask_events')",
+        c"",
+        &EVENTS_ENABLED,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
     GucRegistry::define_int_guc(
         c"pg_ask.schema_char_budget",
         c"Soft cap on schema dump injected into the system prompt (characters).",
@@ -361,6 +369,76 @@ mod tests {
     fn status_api_level_matches_constant() {
         let n: Option<i32> = Spi::get_one("SELECT ask.status_api_level()").unwrap();
         assert_eq!(n, Some(1));
+    }
+
+    #[pg_test]
+    fn emit_is_noop_when_events_disabled() {
+        // Default: events_enabled = off -> ask.emit returns NULL and writes
+        // nothing to the outbox.
+        Spi::run("SET pg_ask.events_enabled = off").unwrap();
+        let id: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask.emit('test.event', '{}'::jsonb)").unwrap();
+        assert!(id.is_none(), "emit should return NULL when disabled");
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
+        assert_eq!(n, Some(0), "no outbox row when disabled");
+    }
+
+    #[pg_test]
+    fn emit_writes_outbox_row_when_enabled() {
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        let id: Option<pgrx::Uuid> = Spi::get_one(
+            "SELECT ask.emit('inventory.critical', '{\"product_id\": 57}'::jsonb, 'stock low')",
+        )
+        .unwrap();
+        assert!(id.is_some(), "emit returns the new row id when enabled");
+
+        // The durable row is present, pending, with payload + summary intact.
+        let event: Option<String> =
+            Spi::get_one("SELECT event FROM ask._outbox ORDER BY ts DESC LIMIT 1").unwrap();
+        assert_eq!(event.as_deref(), Some("inventory.critical"));
+        let summary: Option<String> =
+            Spi::get_one("SELECT summary FROM ask._outbox ORDER BY ts DESC LIMIT 1").unwrap();
+        assert_eq!(summary.as_deref(), Some("stock low"));
+        let pid: Option<i32> = Spi::get_one(
+            "SELECT (payload->>'product_id')::int FROM ask._outbox ORDER BY ts DESC LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(pid, Some(57));
+        let pending: Option<bool> = Spi::get_one(
+            "SELECT processed_at IS NULL FROM ask._outbox ORDER BY ts DESC LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(pending, Some(true), "new row starts pending");
+    }
+
+    #[pg_test]
+    fn emit_rejects_empty_event_name() {
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        let res = std::panic::catch_unwind(|| {
+            Spi::get_one::<pgrx::Uuid>("SELECT ask.emit('', '{}'::jsonb)")
+        });
+        assert!(res.is_err(), "empty event name must raise");
+    }
+
+    #[pg_test]
+    fn outbox_mark_processed_is_idempotent() {
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        let id: pgrx::Uuid =
+            Spi::get_one("SELECT ask.emit('x.y', '{}'::jsonb)").unwrap().unwrap();
+        // First mark flips pending -> processed and returns true.
+        let first: Option<bool> = Spi::get_one_with_args(
+            "SELECT ask._outbox_mark_processed($1)",
+            &[id.into()],
+        )
+        .unwrap();
+        assert_eq!(first, Some(true));
+        // Second mark is a no-op (already processed) and returns false.
+        let second: Option<bool> = Spi::get_one_with_args(
+            "SELECT ask._outbox_mark_processed($1)",
+            &[id.into()],
+        )
+        .unwrap();
+        assert_eq!(second, Some(false));
     }
 
     /// Configure every fixture-driven test the same way: pick the

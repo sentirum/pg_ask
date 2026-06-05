@@ -79,6 +79,7 @@ fn unconfigured_placeholder() -> RuntimeConfig {
         tool_statement_timeout_ms: 0,
         tool_max_rows: 0,
         trace_enabled: true,
+        events_enabled: false,
         schema_char_budget: 0,
         embedding_provider: None,
         embedding_api_key: None,

@@ -278,6 +278,39 @@ CREATE INDEX IF NOT EXISTS _sql_audit_ts_idx     ON ask._sql_audit (ts DESC);
 CREATE INDEX IF NOT EXISTS _sql_audit_caller_idx ON ask._sql_audit (caller, ts DESC);
 
 -- ---------------------------------------------------------------------------
+-- Event outbox (ADR-0017: pg_ask -> senti reverse notifications).
+--
+-- `ask.emit(event, payload)` appends a durable row here and fires
+-- `pg_notify('pg_ask_events', <id>)`. An external orchestrator (senti)
+-- LISTENs on that channel and drains unprocessed rows, marking
+-- `processed_at`. The durable table is the source of truth; NOTIFY is
+-- only a low-latency wake-up, so no event is lost if the listener is
+-- offline (it drains the backlog on reconnect).
+--
+-- Append-only from the caller's side: writes go through the
+-- SECURITY DEFINER helper `ask._outbox_emit` (like _sql_audit), and the
+-- only mutation a consumer performs is stamping `processed_at` via
+-- `ask._outbox_mark_processed`. Readable by PUBLIC (no secrets here —
+-- the payload is operator-authored), writable only through the helpers.
+CREATE TABLE IF NOT EXISTS ask._outbox (
+    id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    ts           timestamptz NOT NULL DEFAULT now(),
+    emitter      name        NOT NULL DEFAULT session_user,
+    db           name        NOT NULL DEFAULT current_database(),
+    event        text        NOT NULL,
+    payload      jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    -- Optional human-readable summary (e.g. an ask.ask() result). Kept
+    -- separate from payload so a listener can show it without parsing JSON.
+    summary      text,
+    -- NULL while pending; stamped by the consumer once delivered.
+    processed_at timestamptz
+);
+-- The hot path is "give me unprocessed rows, oldest first". A partial
+-- index keeps it tiny even when the table accumulates processed history.
+CREATE INDEX IF NOT EXISTS _outbox_pending_idx
+    ON ask._outbox (ts) WHERE processed_at IS NULL;
+
+-- ---------------------------------------------------------------------------
 -- SECURITY DEFINER helpers for internal-table writes.
 --
 -- Background (C3 in the v0.5.2 review): we previously granted
@@ -356,6 +389,45 @@ BEGIN
     GET DIAGNOSTICS n = ROW_COUNT;
     RETURN n > 0;
 END
+$$;
+
+-- Event outbox writer (ADR-0017). Appends one row and returns its id so
+-- the caller can fire pg_notify('pg_ask_events', id). SECURITY DEFINER so
+-- ordinary roles can emit without direct INSERT on ask._outbox; the row is
+-- stamped with session_user as the emitter (survives SECURITY DEFINER, see
+-- the _sql_audit_insert rationale above).
+CREATE OR REPLACE FUNCTION ask._outbox_emit(
+    event   text,
+    payload jsonb,
+    summary text
+) RETURNS uuid
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+    INSERT INTO ask._outbox (emitter, event, payload, summary)
+    VALUES (session_user, event, COALESCE(payload, '{}'::jsonb), summary)
+    RETURNING id;
+$$;
+
+-- Consumer-side: stamp a delivered row as processed. Idempotent (only
+-- stamps rows still pending) and returns whether it changed anything, so a
+-- listener can tell a fresh delivery from a duplicate wake-up. SECURITY
+-- DEFINER because the consumer role need not own the table.
+CREATE OR REPLACE FUNCTION ask._outbox_mark_processed(
+    outbox_id uuid
+) RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+    WITH upd AS (
+        UPDATE ask._outbox
+           SET processed_at = now()
+         WHERE id = outbox_id AND processed_at IS NULL
+        RETURNING id
+    )
+    SELECT EXISTS (SELECT 1 FROM upd);
 $$;
 
 -- Insert a memory row owned by the calling role. The Rust caller passes
@@ -624,6 +696,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA ask FROM PUBLIC;
 GRANT SELECT ON ask._traces    TO PUBLIC;
 GRANT SELECT ON ask._tools     TO PUBLIC;
 GRANT SELECT ON ask._sql_audit TO PUBLIC;
+GRANT SELECT ON ask._outbox    TO PUBLIC;
 DO $grant_memory_select$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_class
@@ -640,6 +713,8 @@ $grant_memory_select$;
 REVOKE ALL ON FUNCTION ask._write_trace(jsonb)                                            FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._sql_audit_insert(text, int, bool, text)                       FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._sql_audit_finish(uuid, bigint, text)                          FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._outbox_emit(text, jsonb, text)                                FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._outbox_mark_processed(uuid)                                   FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._memory_insert(text, text, jsonb, text)                        FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._memory_delete_owned(uuid)                                     FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._tool_register(text, jsonb, text)                              FROM PUBLIC;
@@ -657,6 +732,8 @@ GRANT EXECUTE ON FUNCTION ask._write_trace(jsonb)                               
 GRANT EXECUTE ON FUNCTION ask._memory_bootstrap(int)                                         TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._sql_audit_insert(text, int, bool, text)                    TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._sql_audit_finish(uuid, bigint, text)                       TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._outbox_emit(text, jsonb, text)                             TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._outbox_mark_processed(uuid)                                TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._memory_insert(text, text, jsonb, text)                     TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._memory_delete_owned(uuid)                                  TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._tool_register(text, jsonb, text)                           TO PUBLIC;

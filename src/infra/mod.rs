@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod errors;
+pub mod events;
 pub mod http;
 pub mod spi;
 pub mod status;

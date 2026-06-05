@@ -9,6 +9,28 @@ treats internal Rust modules as private regardless of `pub` visibility.
 Upgrade scripts ship as `sql/pg_ask--<from>--<to>.sql` and run
 automatically under `ALTER EXTENSION pg_ask UPDATE`.
 
+## [Unreleased]
+
+### Added — event outbox for reverse notifications (ADR-0017)
+
+- **`ask.emit(event, payload, summary)`** — append a durable row to the new
+  `ask._outbox` table and fire `pg_notify('pg_ask_events', <id>)`, so an
+  external orchestrator (senti) can react to in-database conditions. The
+  NOTIFY carries only the row id (8 KB cap); the body is read from the
+  outbox. No-op returning NULL unless `pg_ask.events_enabled = on` (default
+  off, opt-in). Intended for triggers / scheduled jobs that have already
+  decided a condition is worth reporting — keep threshold logic in SQL and
+  use `summary := ask.ask('…')` only when a human-readable line is wanted.
+- **`ask._outbox` table** + SECURITY DEFINER writers `ask._outbox_emit`
+  (append) and `ask._outbox_mark_processed` (idempotent consumer stamp).
+  Readable by PUBLIC (payload is operator-authored, no secrets); writable
+  only through the helpers. A partial index keeps the pending-rows query
+  cheap as processed history accumulates.
+- **`pg_ask.events_enabled` GUC** (bool, default off) master switch.
+- pg_ask itself never contacts senti: it only deposits events in its own
+  database. Who listens decides ownership, which keeps multi-tenant /
+  agent isolation automatic. See ADR-0017 in the senti-ai-agent repo.
+
 ## [0.5.5] — 2026-06-05 — Agent-loop efficiency & schema-resolution optimization
 
 Performance-focused release. The dominant cost on multi-schema databases
