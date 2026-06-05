@@ -316,15 +316,57 @@ WHERE caller = current_user
 ORDER BY ts DESC LIMIT 20;
 ```
 
+## Capability handshake (for external orchestrators)
+
+Since v0.5.4, `pg_ask` exposes a single self-describing entry point so an
+external agent platform can discover, in one secret-free round-trip,
+whether a database is ready and how it is configured — without probing
+pg_ask internals or risking exposure of the API key.
+
+```sql
+SELECT ask.status();
+-- {
+--   "extension": "pg_ask",
+--   "version": "0.5.4",
+--   "api_level": 1,            -- contract version for shape-gating
+--   "ready": true,             -- ask.ask() callable right now?
+--   "can_use": true,           -- caller has USAGE on schema ask
+--   "provider_configured": true,
+--   "provider": "anthropic",   -- name only, NEVER the api_key
+--   "model": "claude-sonnet-4-5",
+--   "readonly": true,
+--   "memory_available": false,
+--   "capabilities": ["ask", "sql", "chat", "preview", "register_tool"],
+--   "limits": { "max_iterations": 16, "tool_max_rows": 200 },
+--   "health": "ok"            -- ok | needs_config
+-- }
+
+SELECT ask.status_api_level();  -- 1  (cheap integer probe)
+```
+
+`ask.status()` is `STABLE`, granted to `PUBLIC`, and never raises on a
+half-configured install — a freshly created extension with no provider
+set returns `ready: false`, `health: "needs_config"`, so a caller can
+guide the operator through setup instead of hitting an error. The
+response contains `provider_configured` as a boolean and the provider
+*name*; the API key is never returned.
+
+This is the contract the
+[senti-ai-agent](https://github.com/sentirum/senti-ai-agent) platform
+uses to treat any pg_ask-enabled database as an `ask_database` tool
+(natural-language / SQL-only / multi-turn chat), probe its readiness,
+and offer guided installation — across a fleet of databases, each
+carrying its own provider config inside the database.
+
 ## Docs
 
 - [`CHANGELOG.md`](CHANGELOG.md) — release-by-release diff, including the
-  full v0.5.2 and v0.5.3 hardening lists.
+  v0.5.4 capability handshake and the v0.5.2 / v0.5.3 hardening lists.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — module layout, layering
   rules, request lifecycle, trait contracts, configuration table.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model, defence layers,
   production hardening checklist.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone plan, v0.1 → v0.5.3,
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone plan, v0.1 → v0.5.4,
   what's next.
 
 ## License
