@@ -9,6 +9,31 @@ treats internal Rust modules as private regardless of `pub` visibility.
 Upgrade scripts ship as `sql/pg_ask--<from>--<to>.sql` and run
 automatically under `ALTER EXTENSION pg_ask UPDATE`.
 
+## [Unreleased]
+
+### Changed — agent-loop efficiency & resilience
+
+- **Prompt: stop wasting iterations on schema discovery.** The system
+  prompt now explicitly tells the model that the schema dump lists every
+  table fully qualified as `schema.table`, to use those exact names, and
+  to NOT assume the `public` schema or re-query `pg_catalog` /
+  `information_schema`. The single biggest cause of `agent exceeded max
+  iterations` was the model assuming `public`, failing to find tables in
+  a non-`public` schema, and burning its whole budget re-discovering the
+  catalog. Also nudges the model toward one complete answering query
+  (JOINs/CTEs/window functions) instead of many small exploratory ones,
+  and toward fixing a failed query in place rather than restarting.
+- **`max_iterations` default raised 16 → 24.** Genuinely complex,
+  multi-table questions occasionally need more than 16 tool round-trips;
+  the previous default cut them off. Still overridable via
+  `pg_ask.max_iterations`.
+- **Graceful finalisation instead of a hard error at the budget limit.**
+  When the iteration budget is exhausted, the agent now gets one final
+  tool-free turn instructed to answer from what it already gathered.
+  This converts many `MaxIterations` failures into a useful (if caveated)
+  answer; it only falls back to the `54000` error if the model still
+  produces nothing.
+
 ## [0.5.4] — 2026-06-05 — Capability handshake for external orchestrators
 
 Additive, minor release. Adds a single self-describing introspection

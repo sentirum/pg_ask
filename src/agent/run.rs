@@ -218,6 +218,48 @@ pub fn run_with_cfg(
         }
     }
 
+    // Iteration budget exhausted. Before failing, give the model ONE final
+    // turn with NO tools and an explicit instruction to answer using what it
+    // has already gathered. Complex questions sometimes spend the whole
+    // budget on tool calls and would otherwise error out even though the
+    // data needed for an answer is already in `history`. This converts many
+    // "max iterations" failures into a useful (if caveated) answer.
+    history.push(Message {
+        role: Role::User,
+        content: MessageContent::Text(
+            "You have reached the step limit. Do not call any more tools. \
+             Give your best final answer now using the information you have \
+             already gathered above. If it is incomplete, say so briefly and \
+             answer with what you know."
+                .into(),
+        ),
+    });
+    // Empty tool-spec slice => the model cannot request tools on this turn.
+    if let Ok(ProviderResponse::Final { text, usage })
+    | Ok(ProviderResponse::ToolCalls { text: Some(text), usage, .. }) =
+        provider.complete(&system_prompt, &history, &[])
+    {
+        if !text.is_empty() {
+            if let Some(u) = usage {
+                total_prompt_tokens += u.prompt_tokens;
+                total_completion_tokens += u.completion_tokens;
+            }
+            history.push(Message {
+                role: Role::Assistant,
+                content: MessageContent::Text(text.clone()),
+            });
+            let new_turns = history.split_off(prior_len);
+            return Ok(AgentOutcome {
+                text,
+                iterations: cfg.max_iterations,
+                tool_calls: tool_trace,
+                new_turns,
+                prompt_tokens: total_prompt_tokens,
+                completion_tokens: total_completion_tokens,
+            });
+        }
+    }
+
     Err(AskError::MaxIterations {
         max: cfg.max_iterations,
     })

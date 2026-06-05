@@ -28,6 +28,28 @@ pub fn build(schema_text: &str, mode: AgentMode, readonly: bool) -> String {
                  in the schema. When you have enough information, reply with a \
                  concise natural-language answer (no SQL fences, no JSON).\n",
             );
+            // Schema-qualification + efficiency guidance. The single biggest
+            // cause of wasted iterations is the model assuming the `public`
+            // schema and then hunting for tables it cannot find. The schema
+            // dump below already lists every table as `schema.table`; tell
+            // the model to trust it and not re-discover the catalog.
+            s.push_str(
+                "\nIMPORTANT — work efficiently to avoid wasting steps:\n\
+                 - The schema below lists every table fully qualified as \
+                 `schema.table`. USE THOSE EXACT NAMES. Do NOT assume the \
+                 `public` schema and do NOT query pg_catalog / \
+                 information_schema to re-discover tables — they are already \
+                 listed for you.\n\
+                 - Write ONE complete query that answers the question \
+                 (JOINs, CTEs, aggregates, window functions are all allowed) \
+                 rather than many small exploratory ones.\n\
+                 - Only use `sample_table` / `describe_table` if a column's \
+                 meaning is genuinely unclear; otherwise go straight to the \
+                 answering query.\n\
+                 - If a query errors, read the message, fix that specific \
+                 issue, and retry — do not restart your exploration from \
+                 scratch.\n",
+            );
             if readonly {
                 s.push_str(
                     "READONLY MODE is enabled: only SELECT/WITH/EXPLAIN/TABLE \
