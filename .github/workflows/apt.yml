@@ -136,7 +136,7 @@ jobs:
           service postgresql stop || true
 
       # Rust + cargo-pgrx. We pin pgrx to match Cargo.toml.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust stable
         run: |
@@ -145,7 +145,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -187,7 +187,7 @@ jobs:
           packaging/debian/build-deb.sh
 
       - name: Upload .deb artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: deb-${{ matrix.codename }}-${{ matrix.arch }}
           path: dist/*.deb
@@ -208,7 +208,7 @@ jobs:
     needs: build
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install reprepro + tools
         run: |
@@ -237,7 +237,7 @@ jobs:
           gpg --list-secret-keys --keyid-format=long
 
       - name: Download all .deb artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: incoming
           pattern: deb-*
