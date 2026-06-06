@@ -77,15 +77,14 @@ jobs:
             arch:   arm64
             runner: ubuntu-24.04-arm
 
-          # Fedora 40
-          - dist:   fc40
-            image:  fedora:40
+          # Fedora 42. NB: PGDG only ships Fedora repo RPMs for
+          # x86_64 (no aarch64 reporpm exists), so Fedora is amd64-only.
+          # (PGDG also dropped F-40 — reporpm 404s — so we target a
+          # currently-published release.)
+          - dist:   fc42
+            image:  fedora:42
             arch:   amd64
             runner: ubuntu-24.04
-          - dist:   fc40
-            image:  fedora:40
-            arch:   arm64
-            runner: ubuntu-24.04-arm
 
     steps:
       # The container image starts essentially empty; install just
@@ -96,7 +95,10 @@ jobs:
         run: |
           set -eux
           # `dnf` exists everywhere; install the common toolchain.
-          dnf -y install \
+          # --allowerasing: on EL9 the base image ships curl-minimal,
+          # which conflicts with the full `curl` package; let dnf swap
+          # them instead of failing on the conflict.
+          dnf -y --allowerasing install \
             ca-certificates curl gnupg2 \
             git gcc gcc-c++ make pkgconf-pkg-config \
             clang clang-devel llvm-devel \
@@ -118,15 +120,23 @@ jobs:
               # provides a conflicting "postgresql" module that must be
               # disabled so the PGDG packages win.
               dnf -qy module disable postgresql || true
+              # postgresqlNN-devel pulls perl(IPC::Run) etc. which live
+              # in CRB (CodeReady Builder, the EL9 PowerTools successor).
+              dnf -y install dnf-plugins-core
+              dnf config-manager --set-enabled crb || true
               ;;
             el8)
               dnf -y install \
                 https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-$(arch)/pgdg-redhat-repo-latest.noarch.rpm
               dnf -qy module disable postgresql || true
+              # Same dependency story on EL8, where the repo is called
+              # powertools (lowercase on Rocky 8).
+              dnf -y install dnf-plugins-core
+              dnf config-manager --set-enabled powertools || true
               ;;
-            fc40)
+            fc42)
               dnf -y install \
-                https://download.postgresql.org/pub/repos/yum/reporpms/F-40-$(arch)/pgdg-fedora-repo-latest.noarch.rpm
+                https://download.postgresql.org/pub/repos/yum/reporpms/F-42-$(arch)/pgdg-fedora-repo-latest.noarch.rpm
               ;;
             *) echo "::error::unknown dist ${{ matrix.dist }}"; exit 1 ;;
           esac
@@ -231,7 +241,7 @@ jobs:
             case "$disttag" in
               el9)  target="$repo/el/9" ;;
               el8)  target="$repo/el/8" ;;
-              fc40) target="$repo/fedora/40" ;;
+              fc42) target="$repo/fedora/42" ;;
               *) echo "::error::unknown dist tag '$disttag' for $base"; exit 1 ;;
             esac
             echo "==> cloudsmith push rpm $target $base"

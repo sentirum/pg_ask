@@ -60,8 +60,12 @@ jobs:
         include:
           - arch:   amd64
             runner: ubuntu-24.04
-          - arch:   arm64
-            runner: ubuntu-24.04-arm
+          # TODO(arm64): GitHub can't run JavaScript actions (checkout,
+          # cache, upload-artifact) inside an Alpine `container:` on
+          # arm64 runners — "JavaScript Actions in Alpine containers are
+          # only supported on x64". Re-enable once we either build arm64
+          # via `docker run` on the host (no container:) or GH lifts the
+          # restriction. amd64 .apk ships in the meantime.
 
     steps:
       # alpine:edge ships only main+community by default; that's enough
