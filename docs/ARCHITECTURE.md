@@ -287,7 +287,7 @@ Known keys:
 | `pg_ask.model`                   | text    | `claude-sonnet-4-5`  | GUC → table     |
 | `pg_ask.base_url`                | text    | provider default     | GUC → table     |
 | `pg_ask.max_tokens`              | int     | `4096`               | GUC → table     |
-| `pg_ask.max_iterations`          | int     | `16`                 | GUC → table     |
+| `pg_ask.max_iterations`          | int     | `24`                 | GUC → table     |
 | `pg_ask.readonly`                | bool    | `true`               | GUC → table     |
 | `pg_ask.http_connect_timeout_ms` | int     | `10000`              | GUC → table     |
 | `pg_ask.http_total_timeout_ms`   | int     | `120000`             | GUC → table     |
@@ -411,7 +411,7 @@ matches.
   Live smoke is therefore a recommended pre-release gate, not just
   `cargo test`.
 
-As of v0.5.2: 75/75 tests green.
+As of v0.5.6: 90/90 tests green.
 
 See [`../CHANGELOG.md`](../CHANGELOG.md) for the release-by-release
 diff, `docs/ROADMAP.md` for the milestone-by-milestone feature plan,

@@ -125,7 +125,7 @@ stays NULL under readonly until v0.6 introduces a dblink / bgworker
 
 Per agent run:
 
-- `pg_ask.max_iterations` ceiling (default 16). Stops runaway tool loops.
+- `pg_ask.max_iterations` ceiling (default 24). Stops runaway tool loops.
 - `pg_ask.http_total_timeout_ms` per provider call (default 120s).
 - `check_for_interrupts!()` every iteration; `pg_cancel_backend` works.
 

@@ -203,7 +203,24 @@ which is a tooling primitive.
 - [x] Three `error!()` strings and one bootstrap REVOKE that the
       schema rename had missed.
 
-## v0.5.2 — Hardening release (current)
+## v0.5.6 — Event outbox (current)
+
+Adds the `ask.emit()` event outbox for reverse notifications (ADR-0017),
+on top of the v0.5.3–v0.5.5 line below. Test count: **90 green**.
+See [`CHANGELOG.md`](../CHANGELOG.md) for the full release-by-release diff.
+
+- **v0.5.6** — `ask._outbox` + `ask.emit()` event outbox (opt-in via
+  `pg_ask.events_enabled`) for reverse notifications.
+- **v0.5.5** — agent-loop efficiency: pinned `search_path`, bare-name
+  prompting, `max_iterations` default raised **16 → 24**, graceful
+  budget finalisation.
+- **v0.5.4** — `ask.status()` capability handshake (`api_level = 1`) +
+  `ask.status_api_level()` for external orchestrators (additive).
+- **v0.5.3** — 10 hardening fixes (SQLSTATE-aware errors, token usage
+  tracking, embedding retry/backoff, `_traces` RLS, dynamic embedding
+  dimensions, user-tool caching, soft empty-response recovery).
+
+## v0.5.2 — Hardening release
 
 A pure-hardening release. No new public surface; 25 fixes across
 security, correctness, and performance. End-to-end verified against a
@@ -361,14 +378,22 @@ likelihood of landing in this release:
       concrete operator need surfaces (`SET LOCAL` already covers
       session-scoped overrides).
 - [x] **Distribution:** GitHub Actions CI (PR gate: lint +
-      75 unit tests, no PG runtime required); release workflow
+      90 unit tests, no PG runtime required); release workflow
       (v* tag → GitHub release + prebuilt Linux x86_64 pg18 tarball);
       Docker multi-arch image
       (`ghcr.io/sentirum/pg_ask:VERSION-pg18` + `latest-pg18`)
       via GHCR + docker/buildx QEMU arm64. docker-compose.yml for
       zero-config local try-out with PG_ASK_* env-var provider setup.
-- [ ] **Distribution (remaining):** `META.json` + PGXN submission;
-      `pgxman` manifest; macOS arm64 prebuilt artefact.
+- [x] **APT repo:** `.deb` packages for Debian bookworm/trixie +
+      Ubuntu jammy/noble (`amd64` + `arm64`), published in parallel to
+      GitHub Pages (`sentirum.github.io/pg_ask`) and the Cloudsmith OSS
+      repo (`sentirum/pg_ask`,
+      [broadcasts.cloudsmith.com/sentirum/pg_ask](https://broadcasts.cloudsmith.com/sentirum/pg_ask)).
+- [ ] **Distribution (remaining):** single-source everything on
+      Cloudsmith — add **RPM** (RedHat/Fedora) and **APK** (Alpine)
+      packages plus the Docker image, then retire the self-hosted
+      gh-pages apt repo; `META.json` + PGXN submission; `pgxman`
+      manifest; macOS arm64 prebuilt artefact.
 - [ ] PG matrix CI expansion. v0.5.2 was production-tested on
       pg18 only; pg17 is the next likely target.
 

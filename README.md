@@ -46,7 +46,7 @@ SELECT ask.sql('top 5 customers by lifetime revenue');
 > user-tool caching, soft empty-response recovery). End-to-end
 > verified against a live PG18 backend with ZAI GLM-5.1 over the
 > Anthropic-compatible endpoint, including a four-turn `ask.chat`
-> anaphora canary. 75/75 tests green. See [`CHANGELOG.md`](CHANGELOG.md).
+> anaphora canary. 90/90 tests green. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Why
 
@@ -90,6 +90,22 @@ SELECT ask.ask('…')
 
 ## APT (Debian / Ubuntu)
 
+**Recommended — Cloudsmith** (one line; sets up the keyring + source list
+for your distro automatically):
+
+```bash
+curl -sLf 'https://dl.cloudsmith.io/public/sentirum/pg_ask/cfg/setup/bash.deb.sh' \
+  | sudo bash
+
+sudo apt install postgresql-18-pg-ask
+```
+
+Browse the packages and instructions on the public Cloudsmith page:
+[broadcasts.cloudsmith.com/sentirum/pg_ask](https://broadcasts.cloudsmith.com/sentirum/pg_ask).
+
+<details>
+<summary>Alternative — GitHub Pages APT repo (manual keyring)</summary>
+
 ```bash
 sudo install -d /etc/apt/keyrings
 
@@ -104,10 +120,13 @@ sudo apt update
 sudo apt install postgresql-18-pg-ask
 ```
 
+Landing page: [sentirum.github.io/pg_ask](https://sentirum.github.io/pg_ask).
+
+</details>
+
 Supported: **Debian 12 (bookworm)**, **Debian 13 (trixie)**,
 **Ubuntu 22.04 (jammy)**, **Ubuntu 24.04 (noble)** —
-`amd64` + `arm64`. Landing page with all instructions:
-[sentirum.github.io/pg_ask](https://sentirum.github.io/pg_ask).
+`amd64` + `arm64`.
 
 Then, in psql:
 
@@ -263,7 +282,7 @@ SELECT ask.ask('what is the total revenue per category last month?');
 | `model`          | `claude-sonnet-4-5`         | Model id, provider-specific.                   |
 | `base_url`       | provider default            | For proxies / OpenAI- or Anthropic-compatible endpoints (e.g. `https://api.z.ai/api/anthropic`). |
 | `max_tokens`     | `4096`                      | Per-completion cap.                            |
-| `max_iterations` | `16`                        | Hard ceiling on the agent loop.                |
+| `max_iterations` | `24`                        | Hard ceiling on the agent loop.                |
 | `readonly`       | `true`                      | When `true`, `sql_query` refuses writes.       |
 
 For the full list (timeouts, allow-lists, embedding config, schema
@@ -354,7 +373,7 @@ pg_ask internals or risking exposure of the API key.
 SELECT ask.status();
 -- {
 --   "extension": "pg_ask",
---   "version": "0.5.4",
+--   "version": "0.5.6",
 --   "api_level": 1,            -- contract version for shape-gating
 --   "ready": true,             -- ask.ask() callable right now?
 --   "can_use": true,           -- caller has USAGE on schema ask
@@ -364,7 +383,7 @@ SELECT ask.status();
 --   "readonly": true,
 --   "memory_available": false,
 --   "capabilities": ["ask", "sql", "chat", "preview", "register_tool"],
---   "limits": { "max_iterations": 16, "tool_max_rows": 200 },
+--   "limits": { "max_iterations": 24, "tool_max_rows": 200 },
 --   "health": "ok"            -- ok | needs_config
 -- }
 
