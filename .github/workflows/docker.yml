@@ -195,14 +195,16 @@ jobs:
             ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-pg18
 
       # ── Cloudsmith (parallel target) ─────────────────
-      # Log in to Cloudsmith's Docker registry. Username is the
-      # OWNER/REPO slug, password is the Cloudsmith API key (the
-      # same CLOUDSMITH_TOKEN secret the APT workflow uses).
+      # Log in to Cloudsmith's Docker registry. For PUSH, the username
+      # is the Cloudsmith account username (NOT the OWNER/REPO slug —
+      # that form is only for pull/entitlement tokens) and the password
+      # is the Cloudsmith API key (the same CLOUDSMITH_TOKEN secret the
+      # APT workflow uses).
       - name: Log in to Cloudsmith
         uses: docker/login-action@v3
         with:
           registry: ${{ env.CS_REGISTRY }}
-          username: sentirum/pg_ask
+          username: ersin-tarhan
           password: ${{ secrets.CLOUDSMITH_TOKEN }}
 
       # Re-stitch the same per-arch digests into a manifest list,
