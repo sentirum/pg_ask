@@ -97,8 +97,10 @@ jobs:
           # `dnf` exists everywhere; install the common toolchain.
           # --allowerasing: on EL9 the base image ships curl-minimal,
           # which conflicts with the full `curl` package; let dnf swap
-          # them instead of failing on the conflict.
-          dnf -y --allowerasing install \
+          # them instead of failing on the conflict. NB: it must come
+          # AFTER the `install` subcommand — Fedora's dnf5 rejects it as
+          # a global flag (EL's dnf4 accepts it either way).
+          dnf -y install --allowerasing \
             ca-certificates curl gnupg2 \
             git gcc gcc-c++ make pkgconf-pkg-config \
             clang clang-devel llvm-devel \
