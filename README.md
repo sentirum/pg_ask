@@ -96,7 +96,8 @@ on the public page:
 
 Packages are built for **PostgreSQL 16, 17, and 18** — the package name
 encodes the major (e.g. `postgresql-17-pg-ask`, `pg_ask_16`), so just swap
-the number to match your server.
+the number to match your server. (Exception: the Alpine/APK channel is
+PG 18 only — see that section below.)
 
 ### APT (Debian / Ubuntu)
 
@@ -132,13 +133,14 @@ Supported: **EL 8 / EL 9** (RHEL, Rocky, Alma) `x86_64` + `aarch64`,
 curl -sLf 'https://dl.cloudsmith.io/public/sentirum/pg_ask/cfg/setup/bash.apk.sh' \
   | sudo bash
 
-sudo apk add pg_ask18      # or pg_ask17 / pg_ask16
+sudo apk add pg_ask18
 ```
 
-Supported: **Alpine edge** `x86_64`, for PG 16 / 17 / 18. (All majors are
-built on `edge`: it's the only Alpine branch whose Rust toolchain is new
-enough for the build and it carries the PG 16/17/18 dev packages. The
-setup script configures the `edge` repo for you.)
+Supported: **Alpine edge** `x86_64`, **PG 18 only**. (Alpine has a single
+un-versioned `pg_config` that always points at the newest installed
+major, so per-major builds aren't possible the way they are on
+Debian/RHEL — PG 16/17 users should use the APT, RPM, or Docker channels.
+The setup script configures the `edge` repo for you.)
 
 Then, in psql:
 

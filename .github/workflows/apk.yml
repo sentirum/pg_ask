@@ -3,10 +3,17 @@ name: APK
 # Build .apk packages for Alpine Linux (musl) and publish them to
 # Cloudsmith's OSS-hosted alpine repo (sentirum/pg_ask).
 #
-# IMPORTANT: PostgreSQL 18 dev packages currently only exist in Alpine
-# *edge*, not in the 3.20–3.22 stable branches. So the build container is
-# alpine:edge and we publish under the Cloudsmith "alpine/edge" distro.
-# When PG18 lands in a stable Alpine release we add it to the matrix.
+# IMPORTANT: this leg is PG18-ONLY (unlike apt/rpm/docker which build
+# 16/17/18). Two Alpine-specific reasons:
+#   1. PG18 dev packages only exist in Alpine *edge*, not the stable
+#      3.20–3.22 branches.
+#   2. Alpine has a single un-versioned /usr/bin/pg_config (from
+#      libpq-dev) that always resolves to the highest installed major,
+#      so `cargo pgrx init --pg16` can't be pointed at a real PG16
+#      config — there's no per-major pg_config like Debian/RHEL have.
+# So edge's native major (18) is the only one buildable here. PG 16/17
+# Alpine users would need the deb/rpm/docker channels instead.
+# Build container is alpine:edge; we publish to Cloudsmith "alpine/edge".
 #
 # Cloudsmith manages the alpine repo INDEX signing + APKINDEX generation
 # server-side, but abuild still needs a (throwaway) signing key to
@@ -36,6 +43,14 @@ on:
         default: "v0.5.6"
 
 env:
+  # APK is PG18-only by necessity. Unlike Debian (/usr/lib/postgresql/NN)
+  # and RHEL (/usr/pgsql-NN), Alpine has a single un-versioned
+  # /usr/bin/pg_config (from libpq-dev) that always resolves to the
+  # HIGHEST installed major — so `cargo pgrx init --pg16` against it
+  # fails ("pg_config is for PostgreSQL 18"). Since edge's native major
+  # is 18, that's the only one we can build here. PG 16/17 users are
+  # covered by the deb/rpm/docker channels, which DO isolate majors.
+  PG_MAJOR: "18"
   PGRX_VERSION: "=0.18.1"
 
 permissions:
@@ -43,41 +58,25 @@ permissions:
 
 jobs:
   build:
-    # All three PG majors build on Alpine edge. We tried PG 16/17 on the
-    # stable 3.22 branch, but its Rust (1.87) is too old for cargo-pgrx
-    # 0.18.1's dependency tree (home/time/zip require rustc 1.88+).
-    # edge ships Rust 1.96 and carries postgresql16/17/18-dev, so it's
-    # the one branch that builds every major. amd64-only for now.
-    name: Build pg${{ matrix.pg_major }} alpine-edge amd64
-    # amd64-only (see TODO below); pin the runner directly rather than
-    # carrying it on the matrix.
+    name: Build pg18 alpine-edge amd64
+    # amd64-only: GitHub can't run JavaScript actions (checkout, cache,
+    # upload-artifact) inside an Alpine `container:` on arm64 runners
+    # ("JavaScript Actions in Alpine containers are only supported on
+    # x64"). Re-enable arm64 once we build it via `docker run` on the
+    # host (no container:) or GH lifts the restriction.
     runs-on: ubuntu-24.04
     container: alpine:edge
-
-    strategy:
-      fail-fast: false
-      matrix:
-        pg_major: ["16", "17", "18"]
-        # TODO(arm64): GitHub can't run JavaScript actions (checkout,
-        # cache, upload-artifact) inside an Alpine `container:` on
-        # arm64 runners — "JavaScript Actions in Alpine containers are
-        # only supported on x64". Re-enable once we either build arm64
-        # via `docker run` on the host (no container:) or GH lifts the
-        # restriction. amd64 .apk ships in the meantime.
 
     steps:
       # alpine:edge ships only main+community by default; that's enough
       # for postgresql18-dev and the rust/clang toolchain.
       - name: System build dependencies
-        env:
-          PG_MAJOR: ${{ matrix.pg_major }}
         run: |
           set -eux
           apk update
           # NB: rustfmt is a SEPARATE package on Alpine and pgrx-bindgen
           # invokes it to format generated bindings — without it the
           # pgrx-pg-sys build script fails. (Discovered during feasibility.)
-          # All majors build on edge with the same clang18/llvm18 toolchain.
           apk add --no-cache \
             build-base clang18 clang18-dev llvm18-dev \
             rust cargo rustfmt \
@@ -96,13 +95,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: apk-pg${{ matrix.pg_major }}-edge-amd64-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          key: apk-pg${{ env.PG_MAJOR }}-edge-amd64-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            apk-pg${{ matrix.pg_major }}-edge-amd64-${{ env.PGRX_VERSION }}-
+            apk-pg${{ env.PG_MAJOR }}-edge-amd64-${{ env.PGRX_VERSION }}-
 
       - name: Install cargo-pgrx
-        env:
-          PG_MAJOR: ${{ matrix.pg_major }}
         run: |
           cargo install cargo-pgrx --locked --version ${{ env.PGRX_VERSION }}
           cargo pgrx init --pg${PG_MAJOR} /usr/bin/pg_config
@@ -133,8 +130,7 @@ jobs:
 
       - name: Build .apk
         env:
-          VERSION:  ${{ steps.version.outputs.version }}
-          PG_MAJOR: ${{ matrix.pg_major }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           chmod +x packaging/alpine/build-apk.sh
           bash packaging/alpine/build-apk.sh
@@ -142,7 +138,7 @@ jobs:
       - name: Upload .apk artefact
         uses: actions/upload-artifact@v5
         with:
-          name: apk-pg${{ matrix.pg_major }}-edge-amd64
+          name: apk-pg${{ env.PG_MAJOR }}-edge-amd64
           path: dist/*.apk
           if-no-files-found: error
           retention-days: 7
