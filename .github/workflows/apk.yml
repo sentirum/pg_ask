@@ -48,15 +48,16 @@ jobs:
     # 0.18.1's dependency tree (home/time/zip require rustc 1.88+).
     # edge ships Rust 1.96 and carries postgresql16/17/18-dev, so it's
     # the one branch that builds every major. amd64-only for now.
-    name: Build pg${{ matrix.pg_major }} alpine-edge ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    name: Build pg${{ matrix.pg_major }} alpine-edge amd64
+    # amd64-only (see TODO below); pin the runner directly rather than
+    # carrying it on the matrix.
+    runs-on: ubuntu-24.04
     container: alpine:edge
 
     strategy:
       fail-fast: false
       matrix:
         pg_major: ["16", "17", "18"]
-        arch:     [amd64]
         # TODO(arm64): GitHub can't run JavaScript actions (checkout,
         # cache, upload-artifact) inside an Alpine `container:` on
         # arm64 runners — "JavaScript Actions in Alpine containers are
@@ -95,9 +96,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: apk-pg${{ matrix.pg_major }}-edge-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          key: apk-pg${{ matrix.pg_major }}-edge-amd64-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            apk-pg${{ matrix.pg_major }}-edge-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-
+            apk-pg${{ matrix.pg_major }}-edge-amd64-${{ env.PGRX_VERSION }}-
 
       - name: Install cargo-pgrx
         env:
@@ -141,7 +142,7 @@ jobs:
       - name: Upload .apk artefact
         uses: actions/upload-artifact@v5
         with:
-          name: apk-pg${{ matrix.pg_major }}-edge-${{ matrix.arch }}
+          name: apk-pg${{ matrix.pg_major }}-edge-amd64
           path: dist/*.apk
           if-no-files-found: error
           retention-days: 7
