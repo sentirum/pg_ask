@@ -5,14 +5,26 @@
 
 ## TL;DR — sıradaki iş
 
-**Faz 1 BİTTİ (commit edildi, CI doğrulaması bekliyor).** RPM + APK + Docker
-artık Cloudsmith'e paralel yayınlanıyor. Build scriptleri + workflow'lar lokal
-test edildi (APK pgrx-musl build + abuild paketleme lokalde çalıştı; Docker &
-RPM gerçek tag push'unda CI'da görülecek).
+**Faz 1 TAMAMEN BİTTİ ✅ — 3/3 kanal Cloudsmith'te CI ile DOĞRULANDI**
+(workflow_dispatch ile v0.5.6 kullanılarak test edildi, gerçek tag/sürüm
+bump'ına gerek kalmadan):
+- **APK**: `pg_ask18-0.5.6-r0.apk` → `sentirum/pg_ask/alpine/edge` (amd64)
+- **RPM**: 5 paket → `el/8` & `el/9` (amd64+arm64), `fedora/42` (amd64)
+- **Docker**: `pg_ask:0.5.6-pg18` + `latest-pg18` multi-arch (amd64+arm64) →
+  `docker.cloudsmith.io/sentirum/pg_ask/pg_ask`
 
-**SIRADAKİ:** Gerçek bir tag (örn. v0.5.7) push edip 3 yeni workflow'u CI'da
-doğrula → Cloudsmith'te rpm/apk/docker paketlerinin oluştuğunu teyit et.
-Sonra Faz 2 (gh-pages apt reposunu emekliye ayırma).
+GHCR + gh-pages APT akışlarına dokunulmadı; hepsi paralel çalışıyor.
+
+**SIRADAKİ (Faz 2, acele yok):** gh-pages apt reposunu emekliye ayır →
+tek source Cloudsmith. Önce birkaç sürüm paralel kalsın + gerçek
+`apt/yum/apk install` ile son kullanıcı testi.
+
+**Açık TODO'lar (blokör değil):**
+- APK arm64: GitHub Alpine `container:` + arm64'te JS action (checkout/cache/
+  upload-artifact) çalışmıyor. Çözüm: arm64'ü `container:` yerine host'ta
+  `docker run` ile build et. Şimdilik amd64-only.
+- Fedora arm64: PGDG Fedora reporpm'i sadece x86_64 yayınlıyor → kalıcı amd64-only.
+- Cloudsmith username push login'de `ersin-tarhan` (OWNER/REPO slug DEĞİL).
 
 ---
 
