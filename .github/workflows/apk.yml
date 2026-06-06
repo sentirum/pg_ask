@@ -47,7 +47,10 @@ permissions:
 
 jobs:
   build:
-    name: Build alpine-${{ env.ALPINE_BRANCH }} ${{ matrix.arch }}
+    # NB: job-level name: can't reference env context (GH Actions limit),
+    # so the Alpine branch is hard-coded here; keep in sync with
+    # env.ALPINE_BRANCH above.
+    name: Build alpine-edge ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     container: alpine:edge
 
