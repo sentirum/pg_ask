@@ -366,8 +366,8 @@ fn v6_is_disallowed(ip: &Ipv6Addr) -> bool {
     if (segs[0] & 0xffc0) == 0xfe80 {
         return true;
     }
-    // IPv4-mapped — unwrap and run the v4 guard.
-    if let Some(v4) = ip.to_ipv4_mapped() {
+    // IPv4-mapped / IPv4-compatible — unwrap and run the v4 guard.
+    if let Some(v4) = ip.to_ipv4() {
         return v4_is_disallowed(&v4);
     }
     false

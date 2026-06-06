@@ -91,7 +91,7 @@ fn parse_args(args: &serde_json::Value) -> std::result::Result<(String, String),
         .get("schema")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("public")
+        .unwrap_or("")
         .to_string();
 
     Ok((schema, raw_table.to_string()))

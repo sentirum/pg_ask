@@ -166,6 +166,16 @@ impl RuntimeConfig {
             required_string("api_key", &API_KEY)?
         };
 
+        let embedding_provider = optional_string("embedding_provider", &EMBEDDING_PROVIDER);
+        let mut embedding_api_key = optional_string("embedding_api_key", &EMBEDDING_API_KEY);
+        if embedding_api_key.is_none() {
+            if let Some(ref ep) = embedding_provider {
+                if ep.trim().eq_ignore_ascii_case(&provider) {
+                    embedding_api_key = Some(api_key.clone());
+                }
+            }
+        }
+
         Ok(Self {
             provider,
             api_key,
@@ -191,8 +201,8 @@ impl RuntimeConfig {
             events_enabled: EVENTS_ENABLED.get(),
             schema_char_budget: usize::try_from(SCHEMA_CHAR_BUDGET.get().max(512))
                 .unwrap_or(16_000),
-            embedding_provider: optional_string("embedding_provider", &EMBEDDING_PROVIDER),
-            embedding_api_key: optional_string("embedding_api_key", &EMBEDDING_API_KEY),
+            embedding_provider,
+            embedding_api_key,
             embedding_model: optional_string("embedding_model", &EMBEDDING_MODEL),
             embedding_base_url: optional_string("embedding_base_url", &EMBEDDING_BASE_URL),
             embedding_dimensions: usize::try_from(EMBEDDING_DIMENSIONS.get().max(8))
@@ -200,9 +210,9 @@ impl RuntimeConfig {
             memory_search_alpha: MEMORY_SEARCH_ALPHA.get().clamp(0.0, 1.0),
             memory_enabled: MEMORY_ENABLED.get(),
             allow_http: ALLOW_HTTP.get(),
-            http_allow_list: comma_list(&HTTP_ALLOW_LIST),
+            http_allow_list: optional_comma_list("http_allow_list", &HTTP_ALLOW_LIST),
             allow_private_hosts: ALLOW_PRIVATE_HOSTS.get(),
-            sensitive_columns: comma_list(&SENSITIVE_COLUMNS),
+            sensitive_columns: optional_comma_list("sensitive_columns", &SENSITIVE_COLUMNS),
         })
     }
 }
@@ -324,18 +334,18 @@ fn is_known_key(key: &str) -> bool {
     KNOWN_KEYS.contains(&key)
 }
 
-/// Parse a comma-separated GUC string into a cleaned Vec.
+/// Parse a comma-separated config value into a cleaned Vec, with the
+/// same GUC-then-`ask._config`-table fallback the scalar settings use.
 /// Empty or unset → empty vec. Each item trimmed, deduplicated.
-fn comma_list(guc: &GucSetting<Option<CString>>) -> Vec<String> {
-    guc.get()
-        .and_then(|c| c.into_string().ok())
-        .map(|s| {
-            s.split(',')
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect()
-        })
-        .unwrap_or_default()
+fn optional_comma_list(key: &str, guc: &GucSetting<Option<CString>>) -> Vec<String> {
+    let s = guc_string(guc).or_else(|| read_table(key).ok().flatten());
+    s.map(|val| {
+        val.split(',')
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect()
+    })
+    .unwrap_or_default()
 }

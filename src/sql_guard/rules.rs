@@ -104,9 +104,14 @@ pub fn starts_with_allowed_verb(tokens: &[Token<'_>], mode: GuardMode) -> Result
 }
 
 pub fn no_banned_functions(tokens: &[Token<'_>]) -> Result<()> {
-    // Match: Word("foo") followed by LParen → treat as function call.
+    // Match: Word("foo") or QuotedIdent("foo") followed by LParen → treat as function call.
     for window in tokens.windows(2) {
-        if let (Token::Word(name), Token::LParen) = (&window[0], &window[1]) {
+        let is_func = match &window[0] {
+            Token::Word(name) => Some(*name),
+            Token::QuotedIdent(name) => Some(*name),
+            _ => None,
+        };
+        if let (Some(name), Token::LParen) = (is_func, &window[1]) {
             // Strip any `schema.` prefix; banned names match the rightmost segment.
             let leaf = name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase();
             if BANNED_FUNCTIONS.contains(&leaf.as_str()) {

@@ -114,6 +114,12 @@ pub fn fetch_table_comments() -> Result<Vec<(TableKey, String)>> {
 pub fn fetch_columns_for(schema: &str, table: &str) -> Result<Vec<ColumnRow>> {
     let mut out: Vec<ColumnRow> = Vec::new();
 
+    let qualified_name = if schema.is_empty() {
+        quote_ident(table)
+    } else {
+        format!("{}.{}", quote_ident(schema), quote_ident(table))
+    };
+
     Spi::connect(|client| -> Result<()> {
         let query = r#"
 SELECT
@@ -131,12 +137,11 @@ LEFT JOIN pg_catalog.pg_description d
 WHERE a.attnum > 0
   AND NOT a.attisdropped
   AND c.relkind IN ('r','v','m','p','f')
-  AND n.nspname = $1
-  AND c.relname = $2
+  AND c.oid = pg_catalog.pg_to_regclass($1)
   AND has_table_privilege(c.oid, 'SELECT')
 ORDER BY a.attnum
 "#;
-        let rows = client.select(query, None, &[schema.into(), table.into()])?;
+        let rows = client.select(query, None, &[qualified_name.into()])?;
         for row in rows {
             out.push(ColumnRow {
                 schema: text_at(&row, 1).unwrap_or_default(),
@@ -163,4 +168,12 @@ fn bool_at(row: &pgrx::spi::SpiHeapTupleData<'_>, ord: usize) -> Option<bool> {
     row.get_datum_by_ordinal(ord)
         .ok()
         .and_then(|d| d.value::<bool>().ok().flatten())
+}
+
+fn quote_ident(s: &str) -> String {
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !s.is_empty() {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    }
 }

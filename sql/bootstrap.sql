@@ -684,12 +684,17 @@ $$;
 -- side before returning.
 CREATE OR REPLACE FUNCTION ask._config_get(lookup_key text)
 RETURNS text
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 STABLE
 AS $$
-    SELECT value FROM ask._config WHERE key = lookup_key;
+BEGIN
+    IF lookup_key IN ('api_key', 'embedding_api_key') AND NOT pg_is_superuser() THEN
+        RAISE EXCEPTION 'permission denied to read secret config key';
+    END IF;
+    RETURN (SELECT value FROM ask._config WHERE key = lookup_key);
+END;
 $$;
 
 -- ---------------------------------------------------------------------------
