@@ -20,7 +20,7 @@ SET search_path = pg_catalog, pg_temp
 STABLE
 AS $$
 BEGIN
-    IF lookup_key IN ('api_key', 'embedding_api_key') AND NOT pg_is_superuser() THEN
+    IF lookup_key IN ('api_key', 'embedding_api_key') AND NOT current_setting('is_superuser')::boolean THEN
         RAISE EXCEPTION 'permission denied to read secret config key';
     END IF;
     RETURN (SELECT value FROM ask._config WHERE key = lookup_key);
