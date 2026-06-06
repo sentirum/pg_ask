@@ -297,10 +297,27 @@ jobs:
         run: |
           cd public/apt
           for deb in ../../incoming/*.deb; do
+            base=$(basename "$deb")
             # Codename is the bit between "+" and the next "_" in
             # the version field, e.g. 0.5.3-1+bookworm.
             codename=$(basename "$deb" | sed -E 's/.*\+([a-z]+)_.*/\1/')
-            echo "==> includedeb $codename $(basename "$deb")"
+            # Package name and version come from the .deb control data.
+            pkg=$(dpkg-deb -f "$deb" Package)
+            ver=$(dpkg-deb -f "$deb" Version)
+            arch=$(dpkg-deb -f "$deb" Architecture)
+            # Idempotency: reprepro refuses to overwrite an existing
+            # version with non-identical content (e.g. a re-run produces a
+            # byte-different but functionally equal .deb, since the build
+            # isn't reproducible). If this pkg+version+arch is already in
+            # the codename, skip it instead of failing the whole publish.
+            # `reprepro list` prints: "codename|component|arch: pkg version"
+            if reprepro --basedir . list "$codename" "$pkg" \
+                 | awk -F'[|:] *' -v a="$arch" -v p="$pkg" -v v="$ver" \
+                     '$3==a && $NF==(p " " v){found=1} END{exit !found}'; then
+              echo "==> skip $codename $base (already present: $pkg $ver $arch)"
+              continue
+            fi
+            echo "==> includedeb $codename $base"
             reprepro --basedir . includedeb "$codename" "$deb"
           done
 
