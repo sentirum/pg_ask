@@ -9,6 +9,44 @@ treats internal Rust modules as private regardless of `pub` visibility.
 Upgrade scripts ship as `sql/pg_ask--<from>--<to>.sql` and run
 automatically under `ALTER EXTENSION pg_ask UPDATE`.
 
+## [0.5.7] — 2026-06-06 — Security hardening pass
+
+A security / code-review pass closing several ways a low-privilege role
+could read secrets or reach blocked resources. Upgrade with
+`ALTER EXTENSION pg_ask UPDATE TO '0.5.7';` — the SQL upgrade script
+redefines `ask._config_get()` so the fix reaches existing databases (not
+just fresh installs).
+
+### Security
+
+- **Secret leakage via `ask._config_get()`**: the SECURITY DEFINER helper
+  was granted to PUBLIC with no key filtering, so any role could read
+  `api_key` / `embedding_api_key` in plaintext from `ask._config`.
+  Reimplemented in plpgsql to reject reads of secret keys by
+  non-superusers. (Carried to existing installs by
+  `sql/pg_ask--0.5.6--0.5.7.sql`.)
+- **`sql_guard` banned-function bypass via quoted identifiers**: the
+  lexer-fallback `no_banned_functions` only matched bare word tokens, so a
+  banned call written as `"pg_sleep"(10)` slipped through when the AST
+  parser bailed on the surrounding syntax. Now matches quoted identifiers
+  too.
+- **SSRF via IPv4-compatible IPv6**: the private-network guard used
+  `to_ipv4_mapped`, missing IPv4-compatible addresses like `::127.0.0.1`.
+  Switched to `to_ipv4`, covering both mapped and compatible forms.
+
+### Fixed
+
+- **List config settings ignored the table fallback**: `http_allow_list`
+  and `sensitive_columns` only read their GUC, so values set via
+  `ask.config(...)` (stored in `ask._config`) were silently ignored. They
+  now use the same GUC-then-table fallback as the scalar settings.
+- **`embedding_api_key` fallback**: defaults to the main `api_key` when the
+  embedding provider matches the main provider.
+- **`describe_table` ignored `search_path`**: an unqualified table name was
+  forced to the `public` schema instead of being resolved against
+  `search_path`. Now resolved via `pg_catalog.pg_to_regclass`, so
+  unqualified names follow `search_path` the way SQL does.
+
 ## [0.5.6] — 2026-06-06 — Event outbox for reverse notifications
 
 Adds the pg_ask side of pg_ask → senti reverse alerting (ADR-0017): a
