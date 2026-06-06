@@ -78,12 +78,20 @@ mkdir -p "$DEB_ROOT/usr/share/doc/${PKG_NAME}"
 # Mirror /usr from the staging tree. cp -a preserves modes/symlinks.
 cp -a "${STAGED}/usr" "$DEB_ROOT/"
 
-# We also bundle the handwritten upgrade scripts so an operator who
-# already has 0.5.1 or 0.5.2 installed can step through with
-# `ALTER EXTENSION pg_ask UPDATE`. pgrx-package only stages the
-# current-version files.
-for u in sql/pg_ask--0.5.1--0.5.2.sql sql/pg_ask--0.5.2--0.5.3.sql; do
-    [[ -f "$u" ]] && cp "$u" "$DEB_ROOT/$EXTDIR/"
+# We also bundle every handwritten upgrade script so an operator on any
+# older version can step through with `ALTER EXTENSION pg_ask UPDATE`.
+# pgrx-package only stages the current-version files. Globbing (rather
+# than a hardcoded list) keeps this correct as new upgrade paths land --
+# the old list referenced a nonexistent 0.5.2--0.5.3 file and omitted
+# 0.5.3--0.5.4 onward.
+shopt -s nullglob
+upgrade_scripts=(sql/pg_ask--*--*.sql)
+shopt -u nullglob
+if [[ ${#upgrade_scripts[@]} -eq 0 ]]; then
+    echo "WARNING: no upgrade scripts found under sql/" >&2
+fi
+for u in "${upgrade_scripts[@]}"; do
+    cp "$u" "$DEB_ROOT/$EXTDIR/"
 done
 
 # Installed-size in KiB (dpkg-deb expects an integer in the control
