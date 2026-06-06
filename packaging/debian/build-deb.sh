@@ -175,4 +175,11 @@ echo "==> built $DEB"
 dpkg-deb -I "$DEB"
 echo
 echo "==> contents:"
-dpkg-deb -c "$DEB" | head -20
+# Capture the full listing first, THEN truncate. Piping dpkg-deb
+# straight into `head` makes head close the pipe early; dpkg-deb then
+# dies with SIGPIPE ("tar subprocess was killed by signal (Broken
+# pipe)") and `set -o pipefail` turns that into a build failure. Whether
+# it triggers is a race on the 64KiB pipe buffer, which is why only some
+# matrix legs failed. Buffering the output sidesteps it entirely.
+contents="$(dpkg-deb -c "$DEB")"
+printf '%s\n' "$contents" | head -20
