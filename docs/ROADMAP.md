@@ -384,16 +384,21 @@ likelihood of landing in this release:
       (`ghcr.io/sentirum/pg_ask:VERSION-pg18` + `latest-pg18`)
       via GHCR + docker/buildx QEMU arm64. docker-compose.yml for
       zero-config local try-out with PG_ASK_* env-var provider setup.
-- [x] **APT repo:** `.deb` packages for Debian bookworm/trixie +
-      Ubuntu jammy/noble (`amd64` + `arm64`), published in parallel to
-      GitHub Pages (`sentirum.github.io/pg_ask`) and the Cloudsmith OSS
-      repo (`sentirum/pg_ask`,
-      [broadcasts.cloudsmith.com/sentirum/pg_ask](https://broadcasts.cloudsmith.com/sentirum/pg_ask)).
-- [ ] **Distribution (remaining):** single-source everything on
-      Cloudsmith — add **RPM** (RedHat/Fedora) and **APK** (Alpine)
-      packages plus the Docker image, then retire the self-hosted
-      gh-pages apt repo; `META.json` + PGXN submission; `pgxman`
-      manifest; macOS arm64 prebuilt artefact.
+- [x] **Package distribution — single-sourced on Cloudsmith**
+      ([`sentirum/pg_ask`](https://cloudsmith.io/~sentirum/repos/pg_ask/packages/)):
+      - **APT** `.deb`: Debian bookworm/trixie + Ubuntu jammy/noble
+        (`amd64` + `arm64`).
+      - **RPM**: EL 8/9 (`x86_64` + `aarch64`) + Fedora 42 (`x86_64`).
+      - **APK**: Alpine edge (`x86_64`).
+      - **Docker**: multi-arch image mirrored to GHCR + Cloudsmith.
+
+      The legacy self-hosted gh-pages apt repo (`sentirum.github.io/pg_ask`)
+      was retired — Cloudsmith handles signing + index generation for
+      every format server-side.
+- [ ] **Distribution (remaining):** APK arm64 (blocked on GitHub running
+      JS actions in an Alpine container on arm64); Fedora `aarch64`
+      (blocked on PGDG only shipping x86_64 Fedora reporpms); `META.json`
+      + PGXN submission; `pgxman` manifest; macOS arm64 prebuilt artefact.
 - [ ] PG matrix CI expansion. v0.5.2 was production-tested on
       pg18 only; pg17 is the next likely target.
 

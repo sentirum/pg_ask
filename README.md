@@ -88,45 +88,50 @@ SELECT ask.ask('…')
 - **No `unsafe` outside `src/infra/subtxn.rs`**; all I/O is blocking `ureq`
   (PG backend is single-threaded, no async runtime).
 
-## APT (Debian / Ubuntu)
+## Install from packages
 
-**Recommended — Cloudsmith** (one line; sets up the keyring + source list
-for your distro automatically):
+All packages are published to [Cloudsmith](https://cloudsmith.io). Browse them
+on the public page:
+[cloudsmith.io/~sentirum/repos/pg_ask](https://cloudsmith.io/~sentirum/repos/pg_ask/packages/).
+
+### APT (Debian / Ubuntu)
 
 ```bash
+# Sets up the keyring + source list for your distro automatically
 curl -sLf 'https://dl.cloudsmith.io/public/sentirum/pg_ask/cfg/setup/bash.deb.sh' \
   | sudo bash
 
 sudo apt install postgresql-18-pg-ask
 ```
 
-Browse the packages and instructions on the public Cloudsmith page:
-[broadcasts.cloudsmith.com/sentirum/pg_ask](https://broadcasts.cloudsmith.com/sentirum/pg_ask).
+Supported: **Debian 12 (bookworm)**, **Debian 13 (trixie)**,
+**Ubuntu 22.04 (jammy)**, **Ubuntu 24.04 (noble)** — `amd64` + `arm64`.
 
-<details>
-<summary>Alternative — GitHub Pages APT repo (manual keyring)</summary>
+### RPM (RHEL / Rocky / Alma / Fedora)
 
 ```bash
-sudo install -d /etc/apt/keyrings
+# Sets up the yum/dnf repo for your distro automatically
+curl -sLf 'https://dl.cloudsmith.io/public/sentirum/pg_ask/cfg/setup/bash.rpm.sh' \
+  | sudo bash
 
-curl -fsSL https://sentirum.github.io/pg_ask/pubkey.asc \
-  | sudo gpg --dearmor -o /etc/apt/keyrings/pg_ask.gpg
-
-echo "deb [signed-by=/etc/apt/keyrings/pg_ask.gpg] \
-https://sentirum.github.io/pg_ask $(lsb_release -cs) main" \
-  | sudo tee /etc/apt/sources.list.d/pg_ask.list
-
-sudo apt update
-sudo apt install postgresql-18-pg-ask
+sudo dnf install pg_ask_18      # or: sudo yum install pg_ask_18
 ```
 
-Landing page: [sentirum.github.io/pg_ask](https://sentirum.github.io/pg_ask).
+Supported: **EL 8 / EL 9** (RHEL, Rocky, Alma) `x86_64` + `aarch64`,
+**Fedora 42** `x86_64`.
 
-</details>
+### APK (Alpine)
 
-Supported: **Debian 12 (bookworm)**, **Debian 13 (trixie)**,
-**Ubuntu 22.04 (jammy)**, **Ubuntu 24.04 (noble)** —
-`amd64` + `arm64`.
+```bash
+# Sets up the /etc/apk/repositories entry + signing key automatically
+curl -sLf 'https://dl.cloudsmith.io/public/sentirum/pg_ask/cfg/setup/bash.apk.sh' \
+  | sudo bash
+
+sudo apk add pg_ask18
+```
+
+Supported: **Alpine edge** `x86_64` (PostgreSQL 18 currently lives in
+Alpine's `edge` branch; stable-branch builds follow once it lands there).
 
 Then, in psql:
 
@@ -162,6 +167,17 @@ PG_ASK_PROVIDER=anthropic PG_ASK_API_KEY=sk-ant-... \
 ```
 
 See [`docker-compose.yml`](docker-compose.yml) for all options.
+
+The image is published to two registries (multi-arch, `amd64` + `arm64`) —
+use whichever you prefer:
+
+```bash
+# GitHub Container Registry
+ghcr.io/sentirum/pg_ask:latest-pg18
+
+# Cloudsmith
+docker.cloudsmith.io/sentirum/pg_ask/pg_ask:latest-pg18
+```
 
 ## Install (development)
 

@@ -1,8 +1,12 @@
 name: APT
 
 # Build .deb packages for every supported (distro × arch) combination
-# and publish them to the GitHub Pages branch (gh-pages) as a signed
-# apt repository served at https://sentirum.github.io/pg_ask/.
+# and publish them to Cloudsmith's OSS-hosted apt repo (sentirum/pg_ask).
+#
+# NOTE: the legacy gh-pages/reprepro apt repo (sentirum.github.io/pg_ask)
+# was retired — Cloudsmith is now the single source for all formats
+# (deb/rpm/apk/docker). Cloudsmith manages signing + index generation
+# server-side, so none of the GPG/reprepro machinery is needed here.
 #
 # Pipeline:
 #
@@ -11,14 +15,12 @@ name: APT
 #                ▼
 #         publish (1 job)
 #           ├─ download all .deb artefacts
-#           ├─ reprepro: assemble per-codename repo
-#           ├─ sign Release with APT_GPG_PRIVATE_KEY
-#           └─ git push → gh-pages branch
+#           └─ cloudsmith push deb → sentirum/pg_ask/<debian|ubuntu>/<codename>
 #
 # Triggered by tag pushes (matches release.yml / docker.yml) and by
 # workflow_dispatch so we can rebuild for an existing tag from the
-# Actions UI. apt.yml is the third leg of the v* tag fan-out alongside
-# release.yml (tarball) and docker.yml (GHCR image).
+# Actions UI. apt.yml is one leg of the v* tag fan-out alongside
+# release.yml (tarball), docker.yml, rpm.yml, and apk.yml.
 
 on:
   push:
@@ -36,7 +38,7 @@ env:
   PGRX_VERSION: "=0.18.1"
 
 permissions:
-  contents: write   # needed for gh-pages push
+  contents: read
 
 jobs:
   # ─────────────────────────────────────────────────────
@@ -194,58 +196,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # ─────────────────────────────────────────────────────
-  # Assemble the apt repository from every .deb artefact
-  # and push to the gh-pages branch.
-  #
-  # reprepro is the canonical tool for this — it manages
-  # the Packages/Release/InRelease files and handles GPG
-  # signing in a single `reprepro includedeb` call.
-  # ─────────────────────────────────────────────────────
+  # ────────────────────────────────────────────
+  # Push every .deb artefact to Cloudsmith. Cloudsmith
+  # handles GPG signing + apt index generation server-side,
+  # so this job is just: download → cloudsmith push deb.
+  # ────────────────────────────────────────────
   publish:
-    name: Publish to gh-pages
+    name: Publish to Cloudsmith
     runs-on: ubuntu-24.04
     needs: build
 
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Install reprepro + tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            reprepro gnupg
-
-      # Import the signing key from secrets. The trust dance:
-      # gpg --import → fingerprint → set trust to ultimate so
-      # reprepro will sign without prompting.
-      - name: Import signing key
-        env:
-          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-          APT_GPG_KEY_ID:      ${{ secrets.APT_GPG_KEY_ID }}
-        run: |
-          if [ -z "$APT_GPG_PRIVATE_KEY" ]; then
-            echo "::error::APT_GPG_PRIVATE_KEY secret is empty"
-            exit 1
-          fi
-          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
-          echo "use-agent" > ~/.gnupg/gpg.conf
-          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
-          printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
-          # Set ultimate trust so reprepro can sign non-interactively.
-          # --import-ownertrust requires the full 40-char fingerprint, but
-          # APT_GPG_KEY_ID is a (short/long) key id, which gpg rejects with
-          # "invalid fingerprint". Derive the real fingerprint from the key
-          # we just imported so this works regardless of the secret's format.
-          FPR=$(gpg --batch --with-colons --fingerprint "$APT_GPG_KEY_ID" \
-                  | awk -F: '/^fpr:/ {print $10; exit}')
-          if [ -z "$FPR" ]; then
-            echo "::error::could not resolve fingerprint for key id $APT_GPG_KEY_ID"
-            exit 1
-          fi
-          echo "${FPR}:6:" | gpg --import-ownertrust
-          gpg --list-secret-keys --keyid-format=long
-
       - name: Download all .deb artefacts
         uses: actions/download-artifact@v5
         with:
@@ -258,12 +219,6 @@ jobs:
           echo "Found $(ls incoming/*.deb | wc -l) .deb files:"
           ls -la incoming/
 
-      # Parallel publishing target: push the same .debs to Cloudsmith's
-      # OSS-hosted apt repo (sentirum/pg_ask). This runs alongside the
-      # gh-pages/reprepro flow below; neither depends on the other, so we
-      # can migrate at our own pace and drop gh-pages later. Cloudsmith
-      # manages signing + index generation, so none of the GPG/reprepro
-      # machinery is needed here.
       - name: Install Cloudsmith CLI
         run: pipx install cloudsmith-cli
 
@@ -300,98 +255,3 @@ jobs:
             }
             echo "$out"
           done
-
-      # Pull the existing apt repo state from gh-pages so reprepro can
-      # append new versions without clobbering older ones. First-time
-      # bootstrap (no gh-pages yet) falls back to an empty tree.
-      - name: Fetch existing gh-pages tree
-        run: |
-          mkdir -p public
-          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
-            git clone --depth 1 --branch gh-pages \
-              "https://github.com/${{ github.repository }}.git" public
-            # Drop the checkout's .git so we can re-init clean below.
-            rm -rf public/.git
-          else
-            echo "gh-pages does not exist yet — bootstrapping"
-          fi
-          mkdir -p public/apt/conf public/apt/incoming
-
-      # Compose distributions config from the template. Every
-      # codename gets a stanza, all signed by APT_GPG_KEY_ID.
-      - name: Render reprepro distributions
-        env:
-          APT_GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
-        run: |
-          : > public/apt/conf/distributions
-          for codename in bookworm trixie jammy noble; do
-            sed -e "s|__CODENAME__|$codename|" \
-                -e "s|__KEY_ID__|$APT_GPG_KEY_ID|" \
-                packaging/apt/distributions.template \
-              >> public/apt/conf/distributions
-            echo "" >> public/apt/conf/distributions
-          done
-          cat public/apt/conf/distributions
-
-      # Each .deb filename embeds its codename (e.g.
-      # *_0.5.3-1+bookworm_amd64.deb). reprepro derives the target
-      # codename from the filename + control.
-      - name: Ingest .deb files into reprepro
-        run: |
-          cd public/apt
-          for deb in ../../incoming/*.deb; do
-            base=$(basename "$deb")
-            # Codename is the bit between "+" and the next "_" in
-            # the version field, e.g. 0.5.3-1+bookworm.
-            codename=$(basename "$deb" | sed -E 's/.*\+([a-z]+)_.*/\1/')
-            # Package name and version come from the .deb control data.
-            pkg=$(dpkg-deb -f "$deb" Package)
-            ver=$(dpkg-deb -f "$deb" Version)
-            arch=$(dpkg-deb -f "$deb" Architecture)
-            # Idempotency: reprepro refuses to overwrite an existing
-            # version with non-identical content (e.g. a re-run produces a
-            # byte-different but functionally equal .deb, since the build
-            # isn't reproducible). If this pkg+version+arch is already in
-            # the codename, skip it instead of failing the whole publish.
-            # `reprepro list` prints: "codename|component|arch: pkg version"
-            if reprepro --basedir . list "$codename" "$pkg" \
-                 | awk -F'[|:] *' -v a="$arch" -v p="$pkg" -v v="$ver" \
-                     '$3==a && $NF==(p " " v){found=1} END{exit !found}'; then
-              echo "==> skip $codename $base (already present: $pkg $ver $arch)"
-              continue
-            fi
-            echo "==> includedeb $codename $base"
-            reprepro --basedir . includedeb "$codename" "$deb"
-          done
-
-      - name: Copy pubkey + landing page
-        run: |
-          cp packaging/apt/pubkey.asc public/pubkey.asc
-          sed "s|__BUILD_DATE__|$(date -u +'%Y-%m-%d %H:%M UTC')|" \
-            packaging/apt/index.html.template > public/index.html
-          # Mirror the apt tree to the repo root so the published
-          # URL is …github.io/pg_ask/dists/<codename>/… instead of
-          # …github.io/pg_ask/apt/dists/…
-          cp -a public/apt/dists public/dists
-          cp -a public/apt/pool  public/pool
-
-      - name: Sanity check repo metadata
-        run: |
-          for c in bookworm trixie jammy noble; do
-            echo "=== $c ==="
-            ls public/dists/$c/main/binary-amd64/ || true
-            ls public/dists/$c/main/binary-arm64/ || true
-          done
-
-      # Deploy via the maintained peaceiris action — it does the
-      # orphan-branch dance correctly and force-pushes only if the
-      # tree actually changed.
-      - name: Deploy to gh-pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
-          publish_dir: ./public
-          commit_message: "apt: publish ${{ github.event.inputs.tag || github.ref_name }}"
-          user_name:  "github-actions[bot]"
-          user_email: "github-actions[bot]@users.noreply.github.com"
