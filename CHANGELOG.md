@@ -23,6 +23,17 @@ helpers). Verified live end-to-end against the demo DB, including a DB
 trigger emitting a low-stock alert that a senti listener drained, and the
 cross-role consumer path (emitter ≠ consumer). 90 pg_tests green.
 
+### CI / tooling
+
+- Restore CI to green: `cargo fmt` across 12 files (the rustfmt check had
+  failed since v0.5.3, blocking the pipeline before clippy / pgrx test).
+- Fixture tests fixed: ambiguous `oid` reference in the memory-bootstrap
+  step (`pg_proc.oid`), and `run-fixture-tests.sh` now connects via the
+  in-container socket with `ON_ERROR_STOP=1` so failing statements fail
+  the run instead of silently passing.
+- Bump GitHub Actions to Node 24 runtimes (checkout/cache/upload-artifact/
+  download-artifact `v4 → v5`) ahead of the June 16 2026 Node 20 removal.
+
 ### Added — event outbox for reverse notifications (ADR-0017)
 
 - **`ask.emit(event, payload, summary)`** — append a durable row to the new
