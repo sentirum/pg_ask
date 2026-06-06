@@ -247,15 +247,15 @@ struct FunctionCall {
 }
 
 fn parse_response(resp: GenerateResponse) -> Result<ProviderResponse> {
-    let usage = resp.usage_metadata.and_then(|u| {
-        match (u.prompt_token_count, u.candidates_token_count) {
-            (Some(p), Some(c)) => Some(crate::providers::TokenUsage {
-                prompt_tokens: p,
-                completion_tokens: c,
-            }),
-            _ => None,
-        }
-    });
+    let usage =
+        resp.usage_metadata
+            .and_then(|u| match (u.prompt_token_count, u.candidates_token_count) {
+                (Some(p), Some(c)) => Some(crate::providers::TokenUsage {
+                    prompt_tokens: p,
+                    completion_tokens: c,
+                }),
+                _ => None,
+            });
     let candidate = resp
         .candidates
         .into_iter()

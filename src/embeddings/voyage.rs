@@ -130,10 +130,7 @@ impl VoyageEmbeddings {
         for attempt in 0..=MAX_RETRIES {
             match self.http.post_json::<T>(url, headers, body) {
                 Ok(resp) => return Ok(resp),
-                Err(
-                    ref e @ AskError::ProviderHttp { .. }
-                    | ref e @ AskError::Transport(_),
-                ) => {
+                Err(ref e @ AskError::ProviderHttp { .. } | ref e @ AskError::Transport(_)) => {
                     let retriable = match e {
                         AskError::ProviderHttp { status, .. } => {
                             *status == 429 || (500..600).contains(status)
@@ -147,12 +144,13 @@ impl VoyageEmbeddings {
                     }
 
                     last_err = Some(e.clone());
-                    let delay = Duration::from_millis(
-                        BACKOFF_BASE_MS * 2u64.saturating_pow(attempt)
-                    );
+                    let delay =
+                        Duration::from_millis(BACKOFF_BASE_MS * 2u64.saturating_pow(attempt));
                     pgrx::warning!(
                         "pg_ask voyage embedding: attempt {}/{} failed ({e}), retrying in {}ms",
-                        attempt + 1, MAX_RETRIES + 1, delay.as_millis()
+                        attempt + 1,
+                        MAX_RETRIES + 1,
+                        delay.as_millis()
                     );
                     thread::sleep(delay);
                 }

@@ -30,7 +30,11 @@ pub const EVENT_CHANNEL: &str = "pg_ask_events";
 /// `payload` defaults to `{}` when `None`. `summary` is an optional
 /// human-readable line (e.g. an `ask.ask()` result) kept separate from the
 /// JSON payload so a listener can surface it without parsing.
-pub fn emit(event: &str, payload: Option<serde_json::Value>, summary: Option<&str>) -> Result<Option<Uuid>> {
+pub fn emit(
+    event: &str,
+    payload: Option<serde_json::Value>,
+    summary: Option<&str>,
+) -> Result<Option<Uuid>> {
     if !EVENTS_ENABLED.get() {
         return Ok(None);
     }

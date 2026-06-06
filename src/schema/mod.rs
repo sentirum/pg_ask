@@ -245,7 +245,10 @@ mod tests {
 
     #[test]
     fn search_path_clause_empty_when_no_schema() {
-        assert_eq!(super::search_path_clause("(no user-visible tables found)"), "");
+        assert_eq!(
+            super::search_path_clause("(no user-visible tables found)"),
+            ""
+        );
     }
 
     #[test]

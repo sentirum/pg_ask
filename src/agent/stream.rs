@@ -84,7 +84,11 @@ pub fn run_stream_with_cfg(
                 break;
             }
 
-            ProviderResponse::ToolCalls { text, calls, usage: _ } => {
+            ProviderResponse::ToolCalls {
+                text,
+                calls,
+                usage: _,
+            } => {
                 if let Some(ref t) = text {
                     if !t.is_empty() {
                         out.push(format!("[thinking] {t}"));

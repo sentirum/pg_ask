@@ -404,10 +404,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pid, Some(57));
-        let pending: Option<bool> = Spi::get_one(
-            "SELECT processed_at IS NULL FROM ask._outbox ORDER BY ts DESC LIMIT 1",
-        )
-        .unwrap();
+        let pending: Option<bool> =
+            Spi::get_one("SELECT processed_at IS NULL FROM ask._outbox ORDER BY ts DESC LIMIT 1")
+                .unwrap();
         assert_eq!(pending, Some(true), "new row starts pending");
     }
 
@@ -423,21 +422,16 @@ mod tests {
     #[pg_test]
     fn outbox_mark_processed_is_idempotent() {
         Spi::run("SET pg_ask.events_enabled = on").unwrap();
-        let id: pgrx::Uuid =
-            Spi::get_one("SELECT ask.emit('x.y', '{}'::jsonb)").unwrap().unwrap();
+        let id: pgrx::Uuid = Spi::get_one("SELECT ask.emit('x.y', '{}'::jsonb)")
+            .unwrap()
+            .unwrap();
         // First mark flips pending -> processed and returns true.
-        let first: Option<bool> = Spi::get_one_with_args(
-            "SELECT ask._outbox_mark_processed($1)",
-            &[id.into()],
-        )
-        .unwrap();
+        let first: Option<bool> =
+            Spi::get_one_with_args("SELECT ask._outbox_mark_processed($1)", &[id.into()]).unwrap();
         assert_eq!(first, Some(true));
         // Second mark is a no-op (already processed) and returns false.
-        let second: Option<bool> = Spi::get_one_with_args(
-            "SELECT ask._outbox_mark_processed($1)",
-            &[id.into()],
-        )
-        .unwrap();
+        let second: Option<bool> =
+            Spi::get_one_with_args("SELECT ask._outbox_mark_processed($1)", &[id.into()]).unwrap();
         assert_eq!(second, Some(false));
     }
 

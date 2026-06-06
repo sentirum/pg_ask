@@ -150,7 +150,11 @@ pub fn run_with_cfg(
                 });
             }
 
-            ProviderResponse::ToolCalls { text: tool_text, calls, usage } => {
+            ProviderResponse::ToolCalls {
+                text: tool_text,
+                calls,
+                usage,
+            } => {
                 // P4: accumulate token usage from this tool-call response.
                 if let Some(u) = usage {
                     total_prompt_tokens += u.prompt_tokens;
@@ -191,7 +195,8 @@ pub fn run_with_cfg(
                         role: Role::User,
                         content: MessageContent::Text(
                             "You returned no tool calls and no answer. \
-                             Please respond with your final answer now.".into(),
+                             Please respond with your final answer now."
+                                .into(),
                         ),
                     });
                     continue;
@@ -240,8 +245,11 @@ pub fn run_with_cfg(
     });
     // Empty tool-spec slice => the model cannot request tools on this turn.
     if let Ok(ProviderResponse::Final { text, usage })
-    | Ok(ProviderResponse::ToolCalls { text: Some(text), usage, .. }) =
-        provider.complete(&system_prompt, &history, &[])
+    | Ok(ProviderResponse::ToolCalls {
+        text: Some(text),
+        usage,
+        ..
+    }) = provider.complete(&system_prompt, &history, &[])
     {
         if !text.is_empty() {
             if let Some(u) = usage {

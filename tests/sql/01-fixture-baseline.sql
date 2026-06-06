@@ -110,7 +110,7 @@ SELECT proname, prosecdef
 
 -- ── 11. _memory_bootstrap accepts dims param (S3 fix) ───────────
 \echo '── 11. Memory bootstrap (S3 fix) ────────────────────────────'
-SELECT oid::regprocedure AS signature
+SELECT pg_proc.oid::regprocedure AS signature
   FROM pg_proc
   JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace
  WHERE nspname = 'ask' AND proname = '_memory_bootstrap';

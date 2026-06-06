@@ -17,7 +17,9 @@
 //! Adding a new field is backward-compatible and does NOT bump it; an
 //! external consumer keys off `api_level` to decide how to parse.
 
-use crate::infra::config::{self, API_KEY, MAX_ITERATIONS, MODEL, PROVIDER, READONLY, TOOL_MAX_ROWS};
+use crate::infra::config::{
+    self, API_KEY, MAX_ITERATIONS, MODEL, PROVIDER, READONLY, TOOL_MAX_ROWS,
+};
 use pgrx::guc::GucSetting;
 use serde_json::{json, Value};
 use std::ffi::CString;
@@ -41,24 +43,20 @@ fn read_string(key: &str, guc: &GucSetting<Option<CString>>) -> Option<String> {
 /// itself fails (we'd rather attempt and surface a real error than
 /// falsely claim "no access").
 fn can_use_schema() -> bool {
-    pgrx::Spi::get_one::<bool>(
-        "SELECT has_schema_privilege(current_user, 'ask', 'USAGE')",
-    )
-    .ok()
-    .flatten()
-    .unwrap_or(true)
+    pgrx::Spi::get_one::<bool>("SELECT has_schema_privilege(current_user, 'ask', 'USAGE')")
+        .ok()
+        .flatten()
+        .unwrap_or(true)
 }
 
 /// Is the optional pgvector-backed memory layer actually usable right now?
 /// Requires both the `vector` extension and the `ask._memories` table.
 fn memory_available() -> bool {
     crate::memory::store::pgvector_installed().unwrap_or(false)
-        && pgrx::Spi::get_one::<bool>(
-            "SELECT to_regclass('ask._memories') IS NOT NULL",
-        )
-        .ok()
-        .flatten()
-        .unwrap_or(false)
+        && pgrx::Spi::get_one::<bool>("SELECT to_regclass('ask._memories') IS NOT NULL")
+            .ok()
+            .flatten()
+            .unwrap_or(false)
 }
 
 /// Build the `ask.status()` JSON document.

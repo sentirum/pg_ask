@@ -14,7 +14,10 @@
 set -euo pipefail
 
 COMPOSE_FILE="docker-compose.test.yml"
-PSQL_ARGS="-h localhost -p 15432 -U postgres -d pg_ask_test"
+# psql runs INSIDE the container (via docker compose exec), so connect over
+# the local socket on the in-container port 5432 — NOT the host-mapped 15432.
+# ON_ERROR_STOP=1 ensures a failing statement actually fails the test run.
+PSQL_ARGS="-U postgres -d pg_ask_test -v ON_ERROR_STOP=1"
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  pg_ask fixture integration tests"
@@ -42,7 +45,7 @@ run_test() {
     local file="$2"
     echo ""
     echo "── $name ──"
-    if docker compose -f "$COMPOSE_FILE" exec -T pg psql $PSQL_ARGS -f "$file" 2>&1; then
+    if docker compose -f "$COMPOSE_FILE" exec -T pg psql $PSQL_ARGS -f "$file"; then
         PASS=$((PASS + 1))
         echo "✅ $name PASSED"
     else

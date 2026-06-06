@@ -130,20 +130,19 @@ pub fn load_user_tools(
     statement_timeout_ms: u64,
 ) -> Result<Vec<user_defined::UserDefinedTool>> {
     let current_user: String = Spi::get_one("SELECT current_user")
-        .ok().flatten()
+        .ok()
+        .flatten()
         .unwrap_or_default();
 
     // Check the TTL cache first.
     let cache_hit = TOOL_CACHE.with(|c| {
-        c.borrow()
-            .as_ref()
-            .and_then(|(user, ts, tools)| {
-                if *user == current_user && ts.elapsed().as_secs() < TOOL_CACHE_TTL_SECS {
-                    Some(tools.clone())
-                } else {
-                    None
-                }
-            })
+        c.borrow().as_ref().and_then(|(user, ts, tools)| {
+            if *user == current_user && ts.elapsed().as_secs() < TOOL_CACHE_TTL_SECS {
+                Some(tools.clone())
+            } else {
+                None
+            }
+        })
     });
 
     if let Some(cached) = cache_hit {

@@ -139,10 +139,7 @@ impl OpenAiEmbeddings {
         for attempt in 0..=MAX_RETRIES {
             match self.http.post_json::<T>(url, headers, body) {
                 Ok(resp) => return Ok(resp),
-                Err(
-                    ref e @ AskError::ProviderHttp { .. }
-                    | ref e @ AskError::Transport(_),
-                ) => {
+                Err(ref e @ AskError::ProviderHttp { .. } | ref e @ AskError::Transport(_)) => {
                     let retriable = match e {
                         AskError::ProviderHttp { status, .. } => {
                             *status == 429 || (500..600).contains(status)

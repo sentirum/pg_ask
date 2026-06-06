@@ -110,15 +110,9 @@ impl AskError {
             Self::EmptyResponse => PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
             Self::ProviderHttp { .. } => PgSqlErrorCode::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION,
             Self::Transport(_) => PgSqlErrorCode::ERRCODE_CONNECTION_EXCEPTION,
-            Self::BadJson(_) => {
-                PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION
-            }
-            Self::Tool { .. } | Self::Sql(_) => {
-                PgSqlErrorCode::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION
-            }
-            Self::MaxIterations { .. } => {
-                PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED
-            }
+            Self::BadJson(_) => PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION,
+            Self::Tool { .. } | Self::Sql(_) => PgSqlErrorCode::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION,
+            Self::MaxIterations { .. } => PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
             Self::GuardRejected(_) => PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
         }
     }
