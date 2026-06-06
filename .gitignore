@@ -30,3 +30,5 @@ Cargo.lock.bak
 .env.*
 !.env.example
 sentirum_logo.png
+# Session handoff notes — local working doc, not part of the repo
+HANDOFF.md
