@@ -1,0 +1,5 @@
+Component: main
+Origin: Sentirum
+Label: pg_ask
+Architecture: arm64
+Description: pg_ask APT repository (jammy)

@@ -1,0 +1,28 @@
+Origin: Sentirum
+Label: pg_ask
+Codename: trixie
+Date: Sat, 06 Jun 2026 15:22:18 UTC
+Architectures: amd64 arm64
+Components: main
+Description: pg_ask APT repository (trixie)
+MD5Sum:
+ 74c4060b650d98c5d62d13d1b0477da9 985 main/binary-amd64/Packages
+ 8c0ca08c653e7024a02054443997a034 637 main/binary-amd64/Packages.gz
+ be55a43eb0a16201ef8ba5a3e8807739 111 main/binary-amd64/Release
+ a6f639e17d1c4f132874428ac7160365 985 main/binary-arm64/Packages
+ b68e9658bc988c52d50f342bfeabbe02 636 main/binary-arm64/Packages.gz
+ 822dfe006840b62ff21d2923fd055c26 111 main/binary-arm64/Release
+SHA1:
+ d8cd2d527e2d798b2a7951ca19ccb2d0100e9653 985 main/binary-amd64/Packages
+ 2ca94761dc2d43971321cc743193f91e2b2056b7 637 main/binary-amd64/Packages.gz
+ e4e80fe826930cb5a451f28cc25ad986975ecbb8 111 main/binary-amd64/Release
+ aa495269837d88d438072c16e32d502c1f6d6efe 985 main/binary-arm64/Packages
+ 7b4c4798d027ae1aa0aa40ccd7756ef153f68872 636 main/binary-arm64/Packages.gz
+ 713012208b404bd1ab479e2f43b26a503b7df1f4 111 main/binary-arm64/Release
+SHA256:
+ d24df87959a2de3c59c3798bc11befbd63a6e42f1aa55381d24e723899f84274 985 main/binary-amd64/Packages
+ 6a478455a9b4a67aebd4bacaca17411570176990c52ec3fdc362fa5ba9c0cc6a 637 main/binary-amd64/Packages.gz
+ 03c642e313df333f0ca43de5d55759abbfd413256d4cda7cca5e65810f5d9320 111 main/binary-amd64/Release
+ 5bb2a0f5ae5920dcaf996f4dfb59ff14d42abcd5250401a8ef02dd93b82dcda0 985 main/binary-arm64/Packages
+ 342a2bdcfe73cf2475283a0c3f36bff9bf9aa1ad5b7f90148633b2088f08e291 636 main/binary-arm64/Packages.gz
+ 57d060e5f30aa15cde2018e8bfdb9853311ea16f8aa283675e80bfc3845a5276 111 main/binary-arm64/Release

@@ -1,0 +1,47 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: Sentirum
+Label: pg_ask
+Codename: noble
+Date: Sat, 06 Jun 2026 15:22:18 UTC
+Architectures: amd64 arm64
+Components: main
+Description: pg_ask APT repository (noble)
+MD5Sum:
+ cc2475be84d3478928eb52e7459ad3ab 983 main/binary-amd64/Packages
+ 67a3b887ddfa1c1685faab6cd6f847b8 636 main/binary-amd64/Packages.gz
+ c695b80c84edf0f59cf06268953b741c 110 main/binary-amd64/Release
+ e1fcd0b9c78d17e52e1a8d5ae264165c 983 main/binary-arm64/Packages
+ cfe351998c412d9a84ce206c3bd2448f 634 main/binary-arm64/Packages.gz
+ 8f3752f544c75b1034de40a21af24892 110 main/binary-arm64/Release
+SHA1:
+ 6fa99073b373d18a102e83c6e31f3c27d81cabf4 983 main/binary-amd64/Packages
+ c6ff424969263e7d86b0fa0cd22cd6126f9ed5d2 636 main/binary-amd64/Packages.gz
+ 196fde00d39d1b632e9ba3201af732ee18417ecf 110 main/binary-amd64/Release
+ bad1acc6a016bd63a567d3cc04414139539d5f04 983 main/binary-arm64/Packages
+ e077a7fff9329be8daf4211b6c37e9fbdb6aa012 634 main/binary-arm64/Packages.gz
+ 7309d1b47a11a6dfe02eb33f8c6da9c5608c7c0d 110 main/binary-arm64/Release
+SHA256:
+ 9c5f1a100c4a0255bdcd61afec5ff6874d0b3d5b8a4aef6c59cd52c5d2195e72 983 main/binary-amd64/Packages
+ 86ff8f786f0023f88f1e554923f96868d373ea5c68014b8e8c2ddb8ba4f0acf4 636 main/binary-amd64/Packages.gz
+ dc72c3fa9c4b0faee0a8af35d6abe83d1e38024563e1c7ebb7c10a872be8eedb 110 main/binary-amd64/Release
+ 4e55ef79dca8affeeb03a952434a578b8880a6870cd99c87a335d75d04b74a4a 983 main/binary-arm64/Packages
+ 3ed27481d112cb1365b1da810f46d791586e70bf2b9082eb90bc84045f8274d0 634 main/binary-arm64/Packages.gz
+ 9c4f5c26f23ee6fdfc5333ab5a878a2346655caea61293750be0eeb7b211850f 110 main/binary-arm64/Release
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEVs9Nx9BwmRYWhjUjwqh6MCoQx9AFAmokOyoACgkQwqh6MCoQ
+x9CubxAAv79eRaQOiat8hsjfDjP7m1qiTt+J2EVo5e/nN6qFb6QxYi4R5wWNzJYD
+ljsFMu+ChiOY3jOmMkekMTB3TFBMDiEIpfz0W1T70XI6LwJaTrzL57wXJ0S6dzQp
+thhEDhCxs5cqmm+XCMkAuD2mcNcc4WSbPN1wpazWFan+aBT80Kws21HQSomHcsVW
+n0uGbP/kHRKFV/s9T9NCNe812c62o1ScXoLiljbZX/G+ABe19gGsa40amT2U1xcV
+WTUs4nRrTTgicfXv8XUpuk46q+iGNAlqVxXCnGtZDii5Pt9XL58rXKYBtdi3WA35
+1K7ZVEVG/GCPxT63/oVRS1tRLUC3tTzIcUtif6GJsSOUE7+HlIFwVmRksdwIgJL6
+fOnOY8efCFznb0/EaeyHSycN06M/pqeDnaLhTFLadZyKw8dF2aIJh0jt9XpbHY1r
+n6hPE943OdSVDyKzzBpSdSYP9Q/Bohtt6KIdtLtdb5dTegV/0810BjF1atp3Vs9t
+QHKTpkbJUxfcMir5r1VRC+pDcwSbN9+Gu34v62Xe2dOZ9AKjTldyEPibVSr/+TWD
+YYefhMw5SBavBLNDu5kOzf5vmYTglXIKpoTAkeWiuh+A9vwO0V+Z0iFy8ior1jsw
+FVfF7ix4FhUP/t3Ai5o4Hag05nwPv6hfWn1Awc0LM0OsITnwyEs=
+=XhP8
+-----END PGP SIGNATURE-----

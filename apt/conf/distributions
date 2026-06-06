@@ -1,0 +1,32 @@
+Origin: Sentirum
+Label: pg_ask
+Codename: bookworm
+Architectures: amd64 arm64
+Components: main
+Description: pg_ask APT repository (bookworm)
+SignWith: 671FBB5058EBBD8F
+
+Origin: Sentirum
+Label: pg_ask
+Codename: trixie
+Architectures: amd64 arm64
+Components: main
+Description: pg_ask APT repository (trixie)
+SignWith: 671FBB5058EBBD8F
+
+Origin: Sentirum
+Label: pg_ask
+Codename: jammy
+Architectures: amd64 arm64
+Components: main
+Description: pg_ask APT repository (jammy)
+SignWith: 671FBB5058EBBD8F
+
+Origin: Sentirum
+Label: pg_ask
+Codename: noble
+Architectures: amd64 arm64
+Components: main
+Description: pg_ask APT repository (noble)
+SignWith: 671FBB5058EBBD8F
+

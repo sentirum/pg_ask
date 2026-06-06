@@ -1,0 +1,23 @@
+Package: postgresql-18-pg-ask
+Version: 0.5.6-1+noble
+Architecture: amd64
+Installed-Size: 13828
+Depends: postgresql-18, libc6, libssl3 | libssl3t64
+Maintainer: Sentirum APT <apt@sentirum.ai>
+Homepage: https://github.com/sentirum/pg_ask
+Priority: optional
+Section: database
+Filename: pool/main/p/postgresql-18-pg-ask/postgresql-18-pg-ask_0.5.6-1+noble_amd64.deb
+Size: 3928552
+SHA256: 7c160a984b44ec0379c4c535fb857a12be945ab2477f61e8432fbbc118b03aad
+SHA1: afb1130935569c112f0aa3aa0403f283e7d01b11
+MD5sum: 5cddf011a108acfb05d04436a865616f
+Description: Ask your PostgreSQL database in natural language
+ pg_ask is a PostgreSQL extension that lets you query your database
+ in plain English (or any language). It bundles a built-in tool-using
+ LLM agent — schema-aware, with safe SQL execution, memory, and
+ multi-turn chat sessions — all driven from inside the database.
+ .
+ This package installs the extension for PostgreSQL 18.
+ Enable it per-database with: CREATE EXTENSION pg_ask;
+

@@ -1,0 +1,28 @@
+Origin: Sentirum
+Label: pg_ask
+Codename: jammy
+Date: Sat, 06 Jun 2026 15:22:18 UTC
+Architectures: amd64 arm64
+Components: main
+Description: pg_ask APT repository (jammy)
+MD5Sum:
+ c4451e1124458b010bfca30cb1cbe0b2 983 main/binary-amd64/Packages
+ 667060c6b1842d1f9f69601e3d333070 637 main/binary-amd64/Packages.gz
+ a13f9d1808af32e5b1135c616f3334a3 110 main/binary-amd64/Release
+ b481dc51967f456a6e842a9303b3ca6a 983 main/binary-arm64/Packages
+ 01a3ef400b059b1f264a82f9e5e4038f 635 main/binary-arm64/Packages.gz
+ 25be259ca900796882f47bead5ad92b0 110 main/binary-arm64/Release
+SHA1:
+ 0d60383a90f338771a82f5eb408c62463c89ac73 983 main/binary-amd64/Packages
+ 073171ea844c5bf0b3f7cac4e150bc47c52232e6 637 main/binary-amd64/Packages.gz
+ dedf7df6aad613e9bb3dbd35858c0d14acb03247 110 main/binary-amd64/Release
+ 6d60049fb1a28b4376053462fd2163ed3d788190 983 main/binary-arm64/Packages
+ c38e161d27f67e748065d03455a6ecf48bb8797d 635 main/binary-arm64/Packages.gz
+ 8bbe2ef0df3abfc588f8e3474e83f4d15aff13b7 110 main/binary-arm64/Release
+SHA256:
+ 5691cbbe01f1e5e8f2fcd638dfd3a6cd7b8c895eb3558f4dd46f04c4efb48a88 983 main/binary-amd64/Packages
+ e8e4113f28316a01d8060d804b276cc1d198a8dd808495b8913e40df77238983 637 main/binary-amd64/Packages.gz
+ aaab97b37ac496add7a98841f3a1d68428e50cf67c4121cdb29cb87344df034d 110 main/binary-amd64/Release
+ 2528c7a4622b426e1b40a39142c499f8821623de439e894a62afc2fb5f97cd40 983 main/binary-arm64/Packages
+ 370559e27f329588144d261d684d4f781700d26db6481fdd750426614930b646 635 main/binary-arm64/Packages.gz
+ 3360732e1868d12d6859d99ecf4543a4784c1eb3d453358769bd3aefe39fe2ae 110 main/binary-arm64/Release

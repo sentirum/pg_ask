@@ -1,0 +1,5 @@
+Component: main
+Origin: Sentirum
+Label: pg_ask
+Architecture: amd64
+Description: pg_ask APT repository (noble)
