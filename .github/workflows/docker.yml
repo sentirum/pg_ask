@@ -49,7 +49,7 @@ permissions:
 #                       merge (manifest list)
 #                              │
 #                              ▼
-#         ghcr.io/sentirum/pg_ask:{VERSION-pg18,latest-pg18}
+#         ghcr.io/sentirum/pg_ask:{VERSION-pgNN,latest-pgNN}  (NN=16/17/18)
 #
 # Each build job pushes a digest-only image (no tag). The merge
 # job then assembles the per-platform digests into a multi-arch
@@ -60,12 +60,15 @@ permissions:
 
 jobs:
   build:
-    name: Build (${{ matrix.platform }})
+    name: Build pg${{ matrix.pg_major }} (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
 
+    # {PG 16,17,18} × {amd64,arm64} = 6 per-platform digest builds.
+    # The merge job then assembles one multi-arch manifest per PG major.
     strategy:
       fail-fast: false
       matrix:
+        pg_major: ["16", "17", "18"]
         include:
           - platform: linux/amd64
             runner:   ubuntu-24.04
@@ -102,10 +105,10 @@ jobs:
           # digest instead of a tag. The merge step consumes
           # the digest via the metadata file.
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.arch }}
-          cache-to:   type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.arch }},mode=max
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-pg${{ matrix.pg_major }}-${{ matrix.arch }}
+          cache-to:   type=registry,ref=${{ env.IMAGE }}:buildcache-pg${{ matrix.pg_major }}-${{ matrix.arch }},mode=max
           build-args: |
-            PG_MAJOR=18
+            PG_MAJOR=${{ matrix.pg_major }}
             PGRX_VERSION=0.18.1
 
       # Stage the digest for the merge job. Using one file per
@@ -120,15 +123,23 @@ jobs:
       - name: Upload digest artifact
         uses: actions/upload-artifact@v5
         with:
-          name: digests-${{ matrix.arch }}
+          name: digests-pg${{ matrix.pg_major }}-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    name: Assemble multi-arch manifest
+    name: Assemble pg${{ matrix.pg_major }} multi-arch manifest
     runs-on: ubuntu-24.04
     needs: build
+
+    # One manifest-assembly job per PG major; each stitches that
+    # major's amd64+arm64 digests into a multi-arch image tagged
+    # <version>-pg<major> and latest-pg<major>.
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_major: ["16", "17", "18"]
 
     steps:
       - uses: actions/checkout@v5
@@ -152,19 +163,21 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=${{ steps.version.outputs.version }}-pg18
-            type=raw,value=latest-pg18
+            type=raw,value=${{ steps.version.outputs.version }}-pg${{ matrix.pg_major }}
+            type=raw,value=latest-pg${{ matrix.pg_major }}
           labels: |
             org.opencontainers.image.title=pg_ask
             org.opencontainers.image.description=Ask your PostgreSQL database in natural language
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.licenses=PostgreSQL
 
+      # Only this PG major's digests (both arches) — the pattern is
+      # scoped so we don't mix majors into one manifest.
       - name: Download digests
         uses: actions/download-artifact@v5
         with:
           path: /tmp/digests
-          pattern: digests-*
+          pattern: digests-pg${{ matrix.pg_major }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -192,7 +205,7 @@ jobs:
       - name: Inspect manifest
         run: |
           docker buildx imagetools inspect \
-            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-pg18
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-pg${{ matrix.pg_major }}
 
       # ── Cloudsmith (parallel target) ─────────────────
       # Log in to Cloudsmith's Docker registry. For PUSH, the username
@@ -225,4 +238,4 @@ jobs:
       - name: Inspect Cloudsmith manifest
         run: |
           docker buildx imagetools inspect \
-            ${{ env.CS_IMAGE }}:${{ steps.version.outputs.version }}-pg18
+            ${{ env.CS_IMAGE }}:${{ steps.version.outputs.version }}-pg${{ matrix.pg_major }}

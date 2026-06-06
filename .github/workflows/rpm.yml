@@ -31,7 +31,6 @@ on:
         default: "v0.5.6"
 
 env:
-  PG_MAJOR: "18"
   PGRX_VERSION: "=0.18.1"
 
 permissions:
@@ -49,42 +48,35 @@ jobs:
   # provides the RHEL-family userspace on the arm64 kernel.
   # ─────────────────────────────────────────────────────
   build:
-    name: Build ${{ matrix.dist }} ${{ matrix.arch }}
+    name: Build pg${{ matrix.pg_major }} ${{ matrix.dist }} ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.image }}
 
+    # Cross product: {PG 16,17,18} × {el8,el9,fc42} × {amd64,arm64}.
+    # `include` attaches the per-dist container image and per-arch
+    # runner to every matching combo (the documented, reliable way to
+    # decorate combos). `exclude` drops Fedora/arm64 — PGDG ships no
+    # aarch64 Fedora reporpm. Net: 3×3×2 − (3 Fedora arm64) = 15 jobs.
     strategy:
       fail-fast: false
       matrix:
+        pg_major: ["16", "17", "18"]
+        dist:     [el8, el9, fc42]
+        arch:     [amd64, arm64]
         include:
-          # RHEL 9 family (Rocky Linux 9)
-          - dist:   el9
-            image:  rockylinux:9
-            arch:   amd64
+          - dist:  el8
+            image: rockylinux:8
+          - dist:  el9
+            image: rockylinux:9
+          - dist:  fc42
+            image: fedora:42
+          - arch:   amd64
             runner: ubuntu-24.04
-          - dist:   el9
-            image:  rockylinux:9
-            arch:   arm64
+          - arch:   arm64
             runner: ubuntu-24.04-arm
-
-          # RHEL 8 family (Rocky Linux 8)
-          - dist:   el8
-            image:  rockylinux:8
-            arch:   amd64
-            runner: ubuntu-24.04
-          - dist:   el8
-            image:  rockylinux:8
-            arch:   arm64
-            runner: ubuntu-24.04-arm
-
-          # Fedora 42. NB: PGDG only ships Fedora repo RPMs for
-          # x86_64 (no aarch64 reporpm exists), so Fedora is amd64-only.
-          # (PGDG also dropped F-40 — reporpm 404s — so we target a
-          # currently-published release.)
-          - dist:   fc42
-            image:  fedora:42
-            arch:   amd64
-            runner: ubuntu-24.04
+        exclude:
+          - dist: fc42
+            arch: arm64
 
     steps:
       # The container image starts essentially empty; install just
@@ -144,8 +136,8 @@ jobs:
             *) echo "::error::unknown dist ${{ matrix.dist }}"; exit 1 ;;
           esac
           dnf -y install \
-            postgresql${{ env.PG_MAJOR }}-server \
-            postgresql${{ env.PG_MAJOR }}-devel
+            postgresql${{ matrix.pg_major }}-server \
+            postgresql${{ matrix.pg_major }}-devel
 
       - uses: actions/checkout@v5
 
@@ -162,15 +154,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: rpm-${{ matrix.dist }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          key: rpm-pg${{ matrix.pg_major }}-${{ matrix.dist }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            rpm-${{ matrix.dist }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-
+            rpm-pg${{ matrix.pg_major }}-${{ matrix.dist }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-
 
       - name: Install cargo-pgrx
         run: |
           cargo install cargo-pgrx --locked --version ${{ env.PGRX_VERSION }}
-          cargo pgrx init --pg${{ env.PG_MAJOR }} \
-            /usr/pgsql-${{ env.PG_MAJOR }}/bin/pg_config
+          cargo pgrx init --pg${{ matrix.pg_major }} \
+            /usr/pgsql-${{ matrix.pg_major }}/bin/pg_config
 
       # Derive VERSION from the tag (or workflow_dispatch input). Same
       # shape as docker.yml / apt.yml so all release legs stay in lockstep.
@@ -189,7 +181,7 @@ jobs:
       - name: Build .rpm
         env:
           VERSION:  ${{ steps.version.outputs.version }}
-          PG_MAJOR: ${{ env.PG_MAJOR }}
+          PG_MAJOR: ${{ matrix.pg_major }}
           DIST:     ${{ matrix.dist }}
           ARCH:     ${{ matrix.arch }}
         run: |
@@ -199,7 +191,7 @@ jobs:
       - name: Upload .rpm artefact
         uses: actions/upload-artifact@v5
         with:
-          name: rpm-${{ matrix.dist }}-${{ matrix.arch }}
+          name: rpm-pg${{ matrix.pg_major }}-${{ matrix.dist }}-${{ matrix.arch }}
           path: dist/*.rpm
           if-no-files-found: error
           retention-days: 7

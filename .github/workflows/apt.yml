@@ -34,7 +34,6 @@ on:
         default: "v0.5.3"
 
 env:
-  PG_MAJOR: "18"
   PGRX_VERSION: "=0.18.1"
 
 permissions:
@@ -54,53 +53,33 @@ jobs:
   # that arm64 kernel.
   # ─────────────────────────────────────────────────────
   build:
-    name: Build ${{ matrix.codename }} ${{ matrix.arch }}
+    name: Build pg${{ matrix.pg_major }} ${{ matrix.codename }} ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.image }}
 
+    # Cross product: {PG 16,17,18} × {bookworm,trixie,jammy,noble} ×
+    # {amd64,arm64} = 24 jobs. `include` attaches the per-codename
+    # container image and per-arch runner to each combo. All four
+    # codenames build on both arches (PGDG apt ships arm64 for all).
     strategy:
       fail-fast: false
       matrix:
+        pg_major: ["16", "17", "18"]
+        codename: [bookworm, trixie, jammy, noble]
+        arch:     [amd64, arm64]
         include:
-          # Debian 12 (bookworm)
           - codename: bookworm
             image:    debian:12
-            arch:     amd64
-            runner:   ubuntu-24.04
-          - codename: bookworm
-            image:    debian:12
-            arch:     arm64
-            runner:   ubuntu-24.04-arm
-
-          # Debian 13 (trixie)
           - codename: trixie
             image:    debian:13
-            arch:     amd64
-            runner:   ubuntu-24.04
-          - codename: trixie
-            image:    debian:13
-            arch:     arm64
-            runner:   ubuntu-24.04-arm
-
-          # Ubuntu 22.04 (jammy)
           - codename: jammy
             image:    ubuntu:22.04
-            arch:     amd64
-            runner:   ubuntu-24.04
-          - codename: jammy
-            image:    ubuntu:22.04
-            arch:     arm64
-            runner:   ubuntu-24.04-arm
-
-          # Ubuntu 24.04 (noble)
           - codename: noble
             image:    ubuntu:24.04
-            arch:     amd64
-            runner:   ubuntu-24.04
-          - codename: noble
-            image:    ubuntu:24.04
-            arch:     arm64
-            runner:   ubuntu-24.04-arm
+          - arch:   amd64
+            runner: ubuntu-24.04
+          - arch:   arm64
+            runner: ubuntu-24.04-arm
 
     env:
       DEBIAN_FRONTEND: noninteractive
@@ -130,8 +109,8 @@ jobs:
             > /etc/apt/sources.list.d/pgdg.list
           apt-get update
           apt-get install -y --no-install-recommends \
-            postgresql-${{ env.PG_MAJOR }} \
-            postgresql-server-dev-${{ env.PG_MAJOR }}
+            postgresql-${{ matrix.pg_major }} \
+            postgresql-server-dev-${{ matrix.pg_major }}
           # Stop the auto-started cluster — we only need pg_config /
           # headers. Leaving it running can race with subsequent apt
           # operations inside the container.
@@ -153,15 +132,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: apt-${{ matrix.codename }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          key: apt-pg${{ matrix.pg_major }}-${{ matrix.codename }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            apt-${{ matrix.codename }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-
+            apt-pg${{ matrix.pg_major }}-${{ matrix.codename }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-
 
       - name: Install cargo-pgrx
         run: |
           cargo install cargo-pgrx --locked --version ${{ env.PGRX_VERSION }}
-          cargo pgrx init --pg${{ env.PG_MAJOR }} \
-            /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin/pg_config
+          cargo pgrx init --pg${{ matrix.pg_major }} \
+            /usr/lib/postgresql/${{ matrix.pg_major }}/bin/pg_config
 
       # Derive VERSION from the tag (or workflow_dispatch input). The
       # same shape as docker.yml so all three release legs stay in
@@ -181,7 +160,7 @@ jobs:
       - name: Build .deb
         env:
           VERSION:  ${{ steps.version.outputs.version }}
-          PG_MAJOR: ${{ env.PG_MAJOR }}
+          PG_MAJOR: ${{ matrix.pg_major }}
           DISTRO:   ${{ matrix.codename }}
           ARCH:     ${{ matrix.arch }}
         run: |
@@ -191,7 +170,7 @@ jobs:
       - name: Upload .deb artefact
         uses: actions/upload-artifact@v5
         with:
-          name: deb-${{ matrix.codename }}-${{ matrix.arch }}
+          name: deb-pg${{ matrix.pg_major }}-${{ matrix.codename }}-${{ matrix.arch }}
           path: dist/*.deb
           if-no-files-found: error
           retention-days: 7

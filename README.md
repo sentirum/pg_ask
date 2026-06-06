@@ -94,6 +94,10 @@ All packages are published to [Cloudsmith](https://cloudsmith.io). Browse them
 on the public page:
 [cloudsmith.io/~sentirum/repos/pg_ask](https://cloudsmith.io/~sentirum/repos/pg_ask/packages/).
 
+Packages are built for **PostgreSQL 16, 17, and 18** — the package name
+encodes the major (e.g. `postgresql-17-pg-ask`, `pg_ask_16`), so just swap
+the number to match your server.
+
 ### APT (Debian / Ubuntu)
 
 ```bash
@@ -101,11 +105,12 @@ on the public page:
 curl -sLf 'https://dl.cloudsmith.io/public/sentirum/pg_ask/cfg/setup/bash.deb.sh' \
   | sudo bash
 
-sudo apt install postgresql-18-pg-ask
+sudo apt install postgresql-18-pg-ask   # or -17- / -16- for your PG major
 ```
 
 Supported: **Debian 12 (bookworm)**, **Debian 13 (trixie)**,
-**Ubuntu 22.04 (jammy)**, **Ubuntu 24.04 (noble)** — `amd64` + `arm64`.
+**Ubuntu 22.04 (jammy)**, **Ubuntu 24.04 (noble)** — `amd64` + `arm64`,
+for PG 16 / 17 / 18.
 
 ### RPM (RHEL / Rocky / Alma / Fedora)
 
@@ -114,11 +119,11 @@ Supported: **Debian 12 (bookworm)**, **Debian 13 (trixie)**,
 curl -sLf 'https://dl.cloudsmith.io/public/sentirum/pg_ask/cfg/setup/bash.rpm.sh' \
   | sudo bash
 
-sudo dnf install pg_ask_18      # or: sudo yum install pg_ask_18
+sudo dnf install pg_ask_18      # or pg_ask_17 / pg_ask_16; yum also works
 ```
 
 Supported: **EL 8 / EL 9** (RHEL, Rocky, Alma) `x86_64` + `aarch64`,
-**Fedora 42** `x86_64`.
+**Fedora 42** `x86_64` — for PG 16 / 17 / 18.
 
 ### APK (Alpine)
 
@@ -127,11 +132,13 @@ Supported: **EL 8 / EL 9** (RHEL, Rocky, Alma) `x86_64` + `aarch64`,
 curl -sLf 'https://dl.cloudsmith.io/public/sentirum/pg_ask/cfg/setup/bash.apk.sh' \
   | sudo bash
 
-sudo apk add pg_ask18
+sudo apk add pg_ask18      # or pg_ask17 / pg_ask16
 ```
 
-Supported: **Alpine edge** `x86_64` (PostgreSQL 18 currently lives in
-Alpine's `edge` branch; stable-branch builds follow once it lands there).
+Supported: `x86_64`. **PG 16 & 17** are built against Alpine's stable
+`3.22` branch; **PG 18** lives in Alpine's `edge` branch (it isn't in a
+stable release yet), so PG 18 users need the `edge` repo — the setup
+script handles this automatically based on what you install.
 
 Then, in psql:
 
@@ -168,12 +175,12 @@ PG_ASK_PROVIDER=anthropic PG_ASK_API_KEY=sk-ant-... \
 
 See [`docker-compose.yml`](docker-compose.yml) for all options.
 
-The image is published to two registries (multi-arch, `amd64` + `arm64`) —
-use whichever you prefer:
+The image is published to two registries (multi-arch, `amd64` + `arm64`)
+with a tag per PostgreSQL major — use whichever you prefer:
 
 ```bash
 # GitHub Container Registry
-ghcr.io/sentirum/pg_ask:latest-pg18
+ghcr.io/sentirum/pg_ask:latest-pg18          # or latest-pg17 / latest-pg16
 
 # Cloudsmith
 docker.cloudsmith.io/sentirum/pg_ask/pg_ask:latest-pg18
