@@ -1,0 +1,183 @@
+name: APK
+
+# Build .apk packages for Alpine Linux (musl) and publish them to
+# Cloudsmith's OSS-hosted alpine repo (sentirum/pg_ask).
+#
+# IMPORTANT: PostgreSQL 18 dev packages currently only exist in Alpine
+# *edge*, not in the 3.20–3.22 stable branches. So the build container is
+# alpine:edge and we publish under the Cloudsmith "alpine/edge" distro.
+# When PG18 lands in a stable Alpine release we add it to the matrix.
+#
+# Cloudsmith manages the alpine repo INDEX signing + APKINDEX generation
+# server-side, but abuild still needs a (throwaway) signing key to
+# produce a well-formed .apk, so we generate one at build time.
+#
+# Pipeline:
+#
+#   build (matrix: edge × {amd64, arm64} = 2 jobs)
+#                │
+#                ▼
+#         publish (1 job)
+#           ├─ download all .apk artefacts
+#           └─ cloudsmith push alpine → sentirum/pg_ask/alpine/edge
+#
+# Triggered by tag pushes (lockstep with the other release legs) and by
+# workflow_dispatch for manual rebuilds.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.5.6)"
+        required: true
+        default: "v0.5.6"
+
+env:
+  PG_MAJOR: "18"
+  PGRX_VERSION: "=0.18.1"
+  # Alpine branch whose repos carry postgresql18-dev. Update when PG18
+  # reaches a stable Alpine release.
+  ALPINE_BRANCH: "edge"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build alpine-${{ env.ALPINE_BRANCH }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    container: alpine:edge
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch:   amd64
+            runner: ubuntu-24.04
+          - arch:   arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      # alpine:edge ships only main+community by default; that's enough
+      # for postgresql18-dev and the rust/clang toolchain.
+      - name: System build dependencies
+        run: |
+          set -eux
+          apk update
+          # NB: rustfmt is a SEPARATE package on Alpine and pgrx-bindgen
+          # invokes it to format generated bindings — without it the
+          # pgrx-pg-sys build script fails. (Discovered during feasibility.)
+          apk add --no-cache \
+            build-base clang18 clang18-dev llvm18-dev \
+            rust cargo rustfmt \
+            postgresql${PG_MAJOR}-dev \
+            openssl-dev pkgconf git readline-dev zlib-dev \
+            abuild bash tar curl
+
+      - uses: actions/checkout@v5
+
+      # cargo-pgrx via the distro's cargo (musl rust). --locked keeps the
+      # pinned dependency set; the version matches the other release legs.
+      - name: Cache cargo registry + target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: apk-${{ env.ALPINE_BRANCH }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            apk-${{ env.ALPINE_BRANCH }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-
+
+      - name: Install cargo-pgrx
+        run: |
+          cargo install cargo-pgrx --locked --version ${{ env.PGRX_VERSION }}
+          cargo pgrx init --pg${PG_MAJOR} /usr/bin/pg_config
+
+      # abuild refuses to build without a packager signing key. Generate
+      # a throwaway one in CI (Cloudsmith re-signs the repo index on its
+      # side; this key only makes the individual .apk well-formed).
+      - name: Generate throwaway abuild key
+        run: |
+          mkdir -p ~/.abuild
+          # -i installs the public key into /etc/apk/keys; -n no-prompt.
+          abuild-keygen -a -n
+          # abuild reads PACKAGER_PRIVKEY from ~/.abuild/abuild.conf,
+          # which abuild-keygen -a already wrote.
+          cat ~/.abuild/abuild.conf
+
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VER="${TAG#v}"
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Build .apk
+        env:
+          VERSION:  ${{ steps.version.outputs.version }}
+          PG_MAJOR: ${{ env.PG_MAJOR }}
+        run: |
+          chmod +x packaging/alpine/build-apk.sh
+          bash packaging/alpine/build-apk.sh
+
+      - name: Upload .apk artefact
+        uses: actions/upload-artifact@v5
+        with:
+          name: apk-${{ env.ALPINE_BRANCH }}-${{ matrix.arch }}
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to Cloudsmith
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - name: Install Cloudsmith CLI
+        run: pipx install cloudsmith-cli
+
+      - name: Download all .apk artefacts
+        uses: actions/download-artifact@v5
+        with:
+          path: incoming
+          pattern: apk-*
+          merge-multiple: true
+
+      - name: List downloaded .apks
+        run: |
+          echo "Found $(ls incoming/*.apk | wc -l) .apk files:"
+          ls -la incoming/
+
+      - name: Push .apks to Cloudsmith
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_TOKEN }}
+        run: |
+          repo=sentirum/pg_ask
+          target="$repo/alpine/${{ env.ALPINE_BRANCH }}"
+          for apk in incoming/*.apk; do
+            base=$(basename "$apk")
+            echo "==> cloudsmith push alpine $target $base"
+            # Idempotency: tolerate re-publishing an existing version on
+            # re-runs; still fail on any other error.
+            out=$(cloudsmith push alpine --no-wait-for-sync "$target" "$apk" 2>&1) || {
+              if echo "$out" | grep -qiE 'already exists|conflict|duplicate'; then
+                echo "$out"
+                echo "==> skip $base (already on Cloudsmith)"
+                continue
+              fi
+              echo "$out"
+              echo "::error::cloudsmith push failed for $base"
+              exit 1
+            }
+            echo "$out"
+          done

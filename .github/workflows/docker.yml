@@ -14,6 +14,13 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE:    ghcr.io/sentirum/pg_ask
+  # Parallel publishing target: Cloudsmith's OSS-hosted Docker
+  # registry. Each Cloudsmith repo is its own registry namespace
+  # (docker.cloudsmith.io/OWNER/REPO), and the image name becomes
+  # the final path segment. This runs alongside the GHCR push;
+  # neither depends on the other so we can migrate at our own pace.
+  CS_REGISTRY: docker.cloudsmith.io
+  CS_IMAGE:    docker.cloudsmith.io/sentirum/pg_ask/pg_ask
 
 permissions:
   contents: read
@@ -186,3 +193,34 @@ jobs:
         run: |
           docker buildx imagetools inspect \
             ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-pg18
+
+      # ── Cloudsmith (parallel target) ─────────────────
+      # Log in to Cloudsmith's Docker registry. Username is the
+      # OWNER/REPO slug, password is the Cloudsmith API key (the
+      # same CLOUDSMITH_TOKEN secret the APT workflow uses).
+      - name: Log in to Cloudsmith
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.CS_REGISTRY }}
+          username: sentirum/pg_ask
+          password: ${{ secrets.CLOUDSMITH_TOKEN }}
+
+      # Re-stitch the same per-arch digests into a manifest list,
+      # this time targeting Cloudsmith. `imagetools create` copies
+      # the source blobs (still on GHCR) into the destination
+      # registry, so this produces a self-contained multi-arch
+      # image on Cloudsmith without rebuilding. We rewrite the
+      # GHCR tags in the metadata JSON to point at CS_IMAGE.
+      - name: Create + push manifest list to Cloudsmith
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr --arg img "${{ env.CS_IMAGE }}" \
+                  '.tags | map("-t " + ($img + ":" + (split(":")[-1]))) | join(" ")' \
+                  <<<'${{ steps.meta.outputs.json }}') \
+            $(printf "${{ env.IMAGE }}@sha256:%s " *)
+
+      - name: Inspect Cloudsmith manifest
+        run: |
+          docker buildx imagetools inspect \
+            ${{ env.CS_IMAGE }}:${{ steps.version.outputs.version }}-pg18

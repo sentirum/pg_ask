@@ -16,6 +16,9 @@ Cargo.lock.bak
 !/sql/pg_ask--0.5.5--0.5.6.sql
 /target-*
 
+# Packaging build outputs (deb/rpm/apk staging + artefacts)
+/dist
+
 # Editor
 .idea/
 .vscode/

@@ -5,8 +5,14 @@
 
 ## TL;DR — sıradaki iş
 
-**RPM + APK + Docker image'i de Cloudsmith'e yayınla** ("tek source" hedefi).
-Şu an sadece **APT** ve **Docker (GHCR)** var. RPM ve APK **sıfırdan** kurulacak.
+**Faz 1 BİTTİ (commit edildi, CI doğrulaması bekliyor).** RPM + APK + Docker
+artık Cloudsmith'e paralel yayınlanıyor. Build scriptleri + workflow'lar lokal
+test edildi (APK pgrx-musl build + abuild paketleme lokalde çalıştı; Docker &
+RPM gerçek tag push'unda CI'da görülecek).
+
+**SIRADAKİ:** Gerçek bir tag (örn. v0.5.7) push edip 3 yeni workflow'u CI'da
+doğrula → Cloudsmith'te rpm/apk/docker paketlerinin oluştuğunu teyit et.
+Sonra Faz 2 (gh-pages apt reposunu emekliye ayırma).
 
 ---
 
@@ -25,6 +31,45 @@
 
 ---
 
+## Faz 1 tamamlananlar (2026-06-06, ikinci oturum)
+
+**Docker → Cloudsmith** (`docker.yml`, GHCR'ye DOKUNULMADI):
+- merge job sonuna paralel push: `docker login docker.cloudsmith.io`
+  (user=`sentirum/pg_ask`, pass=`CLOUDSMITH_TOKEN`) → `imagetools create` ile
+  aynı per-arch digest'lerden cross-registry manifest push (rebuild yok).
+- Image: `docker.cloudsmith.io/sentirum/pg_ask/pg_ask:<ver>-pg18` + `latest-pg18`.
+
+**RPM → Cloudsmith** (sıfırdan, `packaging/rpm/build-rpm.sh` + `.github/workflows/rpm.yml`):
+- `build-rpm.sh` = `build-deb.sh` simetriği: `cargo pgrx package` staging tree →
+  `rpmbuild -bb` (hand-populated buildroot, NO `%prep`/`%setup`).
+- Paket adı `pg_ask_18` (PGDG convention). license/changelog buildroot'a manuel
+  kopyalanıyor (çünkü `%doc`/`%license` makrosu `%_builddir` arar, o yok).
+- `debug_package`/strip kapalı (Rust cdylib). arch map: amd64→x86_64, arm64→aarch64.
+- Matrix: rockylinux:9 (el9), rockylinux:8 (el8), fedora:40 (fc40) × amd64/arm64
+  = 6 job; native arm64 runner; PGDG repo + `postgresql18-devel`;
+  `dnf module disable postgresql` (el8/9).
+- Push: `cloudsmith push rpm sentirum/pg_ask/{el/9,el/8,fedora/40}` (filename'den
+  disttag sed ile çıkarılıyor); idempotency 422 skip.
+- ⚠️ Lokal test EDİLMEDİ (RHEL container gerekli). Risk: el8 eski clang/glibc;
+  PG18 PGDG availability ilk run'da görülür.
+
+**APK → Cloudsmith** (sıfırdan, `packaging/alpine/build-apk.sh` + `.github/workflows/apk.yml`):
+- ⚠️ **PG18-dev sadece Alpine `edge`'de** (stable 3.20-3.22'de max PG17). Bu yüzden
+  base image `alpine:edge`, Cloudsmith distro `alpine/edge`. PG18 stable'a düşünce
+  matrix'e eklenir.
+- pgrx + crate **musl'da SORUNSUZ derlendi** (lokal Docker testi). **rustfmt Alpine'de
+  AYRI paket** (`rust` pkg içermiyor), pgrx-bindgen onu çağırıyor → eklendi.
+- `build-apk.sh` = abuild ile paketler; `package()` içinde `mkdir -p $pkgdir`
+  (source='' boşken pkgdir oluşmuyordu) + `SKIP_PGRX_PACKAGE=1` flag (staged reuse).
+  Throwaway abuild key CI'da `abuild-keygen -a -n` ile üretiliyor.
+- Paket adı `pg_ask18`, depend `postgresql18`. Lokal test: `pg_ask18-0.5.6-r0.apk`
+  doğru payload ile üretildi ✓.
+- Push: `cloudsmith push alpine sentirum/pg_ask/alpine/edge`.
+
+**Diğer:** `.gitignore`'a `/dist` eklendi; build scriptleri `chmod +x`; tüm YAML valid.
+
+---
+
 ## Cloudsmith durumu (KRİTİK BİLGİLER)
 
 - **Repo:** `sentirum/pg_ask` (OSS tipi, Broadcast public)
@@ -39,12 +84,12 @@
   Codename→distro eşlemesi: `bookworm|trixie → debian`, `jammy|noble → ubuntu`.
 - **Idempotency:** "already exists/conflict/duplicate" tolere ediliyor, başka hatada fail.
 
-### Sıradaki iş için Cloudsmith komutları (henüz kullanılmadı)
-- RPM:    `cloudsmith push rpm    sentirum/pg_ask/<distro>/<version> file.rpm`
-- APK:    `cloudsmith push alpine sentirum/pg_ask/<distro>/<version> file.apk`
-- Docker: OCI registry `docker.cloudsmith.io/sentirum/pg_ask/<image>:<tag>`
-  (`cloudsmith push docker ...` veya `docker push` + login). Komut/format
-  yeni oturumda resmi doc'tan TEYİT EDİLMELİ.
+### Cloudsmith komutları (Faz 1'de doğrulanmış formatlar)
+- RPM:    `cloudsmith push rpm    sentirum/pg_ask/{el/9,el/8,fedora/40} file.rpm`
+- APK:    `cloudsmith push alpine sentirum/pg_ask/alpine/edge file.apk`
+- Docker: `docker push docker.cloudsmith.io/sentirum/pg_ask/pg_ask:<tag>`
+  (login: registry=`docker.cloudsmith.io`, user=`sentirum/pg_ask`, pass=API key).
+  Cross-registry kopya `docker buildx imagetools create` ile yapılıyor.
 
 ---
 
@@ -54,8 +99,9 @@
 |--------|-------|-----------|
 | APT (.deb) | ✅ var, gh-pages + Cloudsmith | `packaging/debian/build-deb.sh`, `.github/workflows/apt.yml` |
 | Docker | ✅ var, GHCR'ye push | `Dockerfile`, `.github/workflows/docker.yml` (`ghcr.io/sentirum/pg_ask:VERSION-pg18`) |
-| RPM | ❌ YOK — sıfırdan | — |
-| APK | ❌ YOK — sıfırdan | — |
+| RPM | ✅ Cloudsmith (CI doğrulaması bekliyor) | `packaging/rpm/build-rpm.sh`, `.github/workflows/rpm.yml` |
+| APK | ✅ Cloudsmith (CI doğrulaması bekliyor) | `packaging/alpine/build-apk.sh`, `.github/workflows/apk.yml` |
+| Docker (CS) | ✅ Cloudsmith paralel (CI doğrulaması bekliyor) | `docker.yml` (`docker.cloudsmith.io/sentirum/pg_ask/pg_ask`) |
 
 Desteklenen APT hedefleri: Debian bookworm/trixie + Ubuntu jammy/noble, `amd64`+`arm64`.
 
@@ -72,23 +118,22 @@ Desteklenen APT hedefleri: Debian bookworm/trixie + Ubuntu jammy/noble, `amd64`+
 
 ---
 
-## Plan: RPM + APK + Docker → Cloudsmith (Faz 1 = paralel yayın)
+## Plan: Faz 1 BİTTİ → Faz 2 (sonra)
 
-**Faz 1 (yapılacak):** mevcut kanallara DOKUNMADAN Cloudsmith'e paralel yayın.
-1. **RPM** — pgrx `cargo pgrx package` çıktısından `.rpm` üret (`.spec` veya `fpm`).
-   RedHat/Fedora hedefleri. Yeni workflow ya da mevcut bir job'a matris.
-2. **APK** — Alpine `APKBUILD` (musl! pgrx'in musl derlemesi araştırılmalı — RİSK).
-3. **Docker** — mevcut `docker.yml`'i Cloudsmith OCI registry'ye de push edecek şekilde
-   genişlet (GHCR'ye dokunma, paralel ekle).
+**Faz 1 (✅ tamam):** RPM + APK + Docker Cloudsmith'e paralel yayın — yukarıda detay.
+
+**SIRADAKİ ADIM — CI doğrulaması:** Gerçek tag push (v0.5.7) ile 3 workflow'u
+çalıştır → Cloudsmith'te paketleri teyit et. Beklenen ilk-run sürprizleri:
+- RPM el8: eski clang/glibc ile pgrx 0.18.1 derlemesi patlayabilir (gerekirse el8 düşür).
+- RPM: `postgresql18-server`/`-devel` PGDG yum'da el8/el9/fc40 için mevcut olmalı.
+- APK: `alpine:edge` hareketli hedef; PG18 stable'a düşünce `ALPINE_BRANCH` güncelle.
 
 **Faz 2 (sonra, ACELE YOK):** gh-pages apt reposunu emekliye ayır, tek source Cloudsmith.
 Önce birkaç sürüm paralel kalsın + gerçek `apt install` / `yum install` / `apk add` testi.
 
 ### Dikkat / riskler
-- **APK/musl:** pgrx + PostgreSQL extension'ı musl/Alpine'de derlemek zahmetli olabilir.
-  Önce fizibilite kontrol et; gerekirse APK'yı erteleyip RPM+Docker ile başla.
-- **Reproducible build değil** → idempotency koruması her formatta gerekli (re-run güvenliği).
-- Her yeni format için codename/distro→Cloudsmith path eşlemesi netleştirilmeli.
+- **Reproducible build değil** → idempotency koruması her formatta var (re-run güvenli).
+- APK base `alpine:edge` (PG18 stable'da yok) — sürüm asimetrisi geçici.
 
 ---
 

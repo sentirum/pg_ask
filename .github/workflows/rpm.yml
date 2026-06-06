@@ -1,0 +1,252 @@
+name: RPM
+
+# Build .rpm packages for every supported (distro × arch) combination
+# and publish them to Cloudsmith's OSS-hosted yum repo (sentirum/pg_ask).
+# Cloudsmith manages signing + repo metadata (repomd.xml), so unlike the
+# apt leg there's no reprepro/createrepo machinery here — just build and
+# push.
+#
+# Pipeline:
+#
+#   build (matrix 3 distros × 2 archs = 6 jobs)
+#                │
+#                ▼
+#         publish (1 job)
+#           ├─ download all .rpm artefacts
+#           └─ cloudsmith push rpm  → sentirum/pg_ask/<el|fedora>/<rel>
+#
+# Triggered by tag pushes (matches release.yml / docker.yml / apt.yml)
+# and by workflow_dispatch so we can rebuild for an existing tag from
+# the Actions UI.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.5.6)"
+        required: true
+        default: "v0.5.6"
+
+env:
+  PG_MAJOR: "18"
+  PGRX_VERSION: "=0.18.1"
+
+permissions:
+  contents: read
+
+jobs:
+  # ─────────────────────────────────────────────────────
+  # 6-way matrix. Each job runs inside a distro-specific
+  # container so the resulting .rpm links against that
+  # distro's libc/openssl — critical for a PG extension
+  # whose .so is dlopened by the system postgres binary.
+  #
+  # arm64 jobs use the native ubuntu-24.04-arm runner
+  # (same fix as docker.yml / apt.yml); the container then
+  # provides the RHEL-family userspace on the arm64 kernel.
+  # ─────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.dist }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # RHEL 9 family (Rocky Linux 9)
+          - dist:   el9
+            image:  rockylinux:9
+            arch:   amd64
+            runner: ubuntu-24.04
+          - dist:   el9
+            image:  rockylinux:9
+            arch:   arm64
+            runner: ubuntu-24.04-arm
+
+          # RHEL 8 family (Rocky Linux 8)
+          - dist:   el8
+            image:  rockylinux:8
+            arch:   amd64
+            runner: ubuntu-24.04
+          - dist:   el8
+            image:  rockylinux:8
+            arch:   arm64
+            runner: ubuntu-24.04-arm
+
+          # Fedora 40
+          - dist:   fc40
+            image:  fedora:40
+            arch:   amd64
+            runner: ubuntu-24.04
+          - dist:   fc40
+            image:  fedora:40
+            arch:   arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      # The container image starts essentially empty; install just
+      # what we need to clone, set up Rust+pgrx, and build an .rpm.
+      # dnf is present on all three; Rocky 8 needs the EL8 PGDG repo
+      # URL, Rocky 9 the EL9 one, Fedora its own.
+      - name: System build dependencies
+        run: |
+          set -eux
+          # `dnf` exists everywhere; install the common toolchain.
+          dnf -y install \
+            ca-certificates curl gnupg2 \
+            git gcc gcc-c++ make pkgconf-pkg-config \
+            clang clang-devel llvm-devel \
+            rpm-build rpmdevtools redhat-rpm-config \
+            sudo which findutils
+
+      # PGDG repo for postgresql${PG_MAJOR}. The RPM repo RPMs differ
+      # per EL major / Fedora; pick the right one from the dist tag.
+      # The aarch64 builds use the same repo definitions (PGDG ships
+      # aarch64 packages for EL8/EL9).
+      - name: Add PGDG repo + install postgres devel
+        run: |
+          set -eux
+          case "${{ matrix.dist }}" in
+            el9)
+              dnf -y install \
+                https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-$(arch)/pgdg-redhat-repo-latest.noarch.rpm
+              # PG18+ ships in the PGDG repo; the EL9 base AppStream
+              # provides a conflicting "postgresql" module that must be
+              # disabled so the PGDG packages win.
+              dnf -qy module disable postgresql || true
+              ;;
+            el8)
+              dnf -y install \
+                https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-$(arch)/pgdg-redhat-repo-latest.noarch.rpm
+              dnf -qy module disable postgresql || true
+              ;;
+            fc40)
+              dnf -y install \
+                https://download.postgresql.org/pub/repos/yum/reporpms/F-40-$(arch)/pgdg-fedora-repo-latest.noarch.rpm
+              ;;
+            *) echo "::error::unknown dist ${{ matrix.dist }}"; exit 1 ;;
+          esac
+          dnf -y install \
+            postgresql${{ env.PG_MAJOR }}-server \
+            postgresql${{ env.PG_MAJOR }}-devel
+
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: rpm-${{ matrix.dist }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rpm-${{ matrix.dist }}-${{ matrix.arch }}-${{ env.PGRX_VERSION }}-
+
+      - name: Install cargo-pgrx
+        run: |
+          cargo install cargo-pgrx --locked --version ${{ env.PGRX_VERSION }}
+          cargo pgrx init --pg${{ env.PG_MAJOR }} \
+            /usr/pgsql-${{ env.PG_MAJOR }}/bin/pg_config
+
+      # Derive VERSION from the tag (or workflow_dispatch input). Same
+      # shape as docker.yml / apt.yml so all release legs stay in lockstep.
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VER="${TAG#v}"
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Build .rpm
+        env:
+          VERSION:  ${{ steps.version.outputs.version }}
+          PG_MAJOR: ${{ env.PG_MAJOR }}
+          DIST:     ${{ matrix.dist }}
+          ARCH:     ${{ matrix.arch }}
+        run: |
+          chmod +x packaging/rpm/build-rpm.sh
+          packaging/rpm/build-rpm.sh
+
+      - name: Upload .rpm artefact
+        uses: actions/upload-artifact@v5
+        with:
+          name: rpm-${{ matrix.dist }}-${{ matrix.arch }}
+          path: dist/*.rpm
+          if-no-files-found: error
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────
+  # Push every .rpm artefact to Cloudsmith. Cloudsmith
+  # handles GPG signing + repomd generation server-side,
+  # so this job is just: download → cloudsmith push rpm.
+  # ─────────────────────────────────────────────────────
+  publish:
+    name: Publish to Cloudsmith
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - name: Install Cloudsmith CLI
+        run: pipx install cloudsmith-cli
+
+      - name: Download all .rpm artefacts
+        uses: actions/download-artifact@v5
+        with:
+          path: incoming
+          pattern: rpm-*
+          merge-multiple: true
+
+      - name: List downloaded .rpms
+        run: |
+          echo "Found $(ls incoming/*.rpm | wc -l) .rpm files:"
+          ls -la incoming/
+
+      - name: Push .rpms to Cloudsmith
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_TOKEN }}
+        run: |
+          repo=sentirum/pg_ask
+          for rpm in incoming/*.rpm; do
+            base=$(basename "$rpm")
+            # The dist tag is embedded in the filename, e.g.
+            # pg_ask_18-0.5.6-1.el9.x86_64.rpm -> el9. Map it to the
+            # Cloudsmith distro/release path it expects.
+            disttag=$(echo "$base" | sed -E 's/.*-1\.([a-z0-9]+)\..*/\1/')
+            case "$disttag" in
+              el9)  target="$repo/el/9" ;;
+              el8)  target="$repo/el/8" ;;
+              fc40) target="$repo/fedora/40" ;;
+              *) echo "::error::unknown dist tag '$disttag' for $base"; exit 1 ;;
+            esac
+            echo "==> cloudsmith push rpm $target $base"
+            # Idempotency: re-publishing an already-uploaded version
+            # returns a 422 conflict. Tolerate that on re-runs while
+            # still failing on any other (real) error.
+            out=$(cloudsmith push rpm --no-wait-for-sync "$target" "$rpm" 2>&1) || {
+              if echo "$out" | grep -qiE 'already exists|conflict|duplicate'; then
+                echo "$out"
+                echo "==> skip $base (already on Cloudsmith)"
+                continue
+              fi
+              echo "$out"
+              echo "::error::cloudsmith push failed for $base"
+              exit 1
+            }
+            echo "$out"
+          done
