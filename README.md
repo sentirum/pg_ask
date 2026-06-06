@@ -135,10 +135,10 @@ curl -sLf 'https://dl.cloudsmith.io/public/sentirum/pg_ask/cfg/setup/bash.apk.sh
 sudo apk add pg_ask18      # or pg_ask17 / pg_ask16
 ```
 
-Supported: `x86_64`. **PG 16 & 17** are built against Alpine's stable
-`3.22` branch; **PG 18** lives in Alpine's `edge` branch (it isn't in a
-stable release yet), so PG 18 users need the `edge` repo — the setup
-script handles this automatically based on what you install.
+Supported: **Alpine edge** `x86_64`, for PG 16 / 17 / 18. (All majors are
+built on `edge`: it's the only Alpine branch whose Rust toolchain is new
+enough for the build and it carries the PG 16/17/18 dev packages. The
+setup script configures the `edge` repo for you.)
 
 Then, in psql:
 
