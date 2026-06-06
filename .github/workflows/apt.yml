@@ -258,6 +258,49 @@ jobs:
           echo "Found $(ls incoming/*.deb | wc -l) .deb files:"
           ls -la incoming/
 
+      # Parallel publishing target: push the same .debs to Cloudsmith's
+      # OSS-hosted apt repo (sentirum/pg_ask). This runs alongside the
+      # gh-pages/reprepro flow below; neither depends on the other, so we
+      # can migrate at our own pace and drop gh-pages later. Cloudsmith
+      # manages signing + index generation, so none of the GPG/reprepro
+      # machinery is needed here.
+      - name: Install Cloudsmith CLI
+        run: pipx install cloudsmith-cli
+
+      - name: Push .debs to Cloudsmith
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_TOKEN }}
+        run: |
+          repo=sentirum/pg_ask
+          for deb in incoming/*.deb; do
+            base=$(basename "$deb")
+            # Codename lives between "+" and the next "_", e.g.
+            # ..._0.5.6-1+bookworm_amd64.deb -> bookworm.
+            codename=$(echo "$base" | sed -E 's/.*\+([a-z]+)_.*/\1/')
+            case "$codename" in
+              bookworm|trixie)  distro=debian ;;
+              jammy|noble)      distro=ubuntu ;;
+              *) echo "::error::unknown codename '$codename' for $base"; exit 1 ;;
+            esac
+            target="$repo/$distro/$codename"
+            echo "==> cloudsmith push deb $target $base"
+            # Idempotency: re-running a publish for an already-uploaded
+            # version makes Cloudsmith return a 422 "already exists"
+            # conflict. Tolerate that so re-runs don't fail the job, while
+            # still failing on any other (real) error.
+            out=$(cloudsmith push deb --no-wait-for-sync "$target" "$deb" 2>&1) || {
+              if echo "$out" | grep -qiE 'already exists|conflict|duplicate'; then
+                echo "$out"
+                echo "==> skip $base (already on Cloudsmith)"
+                continue
+              fi
+              echo "$out"
+              echo "::error::cloudsmith push failed for $base"
+              exit 1
+            }
+            echo "$out"
+          done
+
       # Pull the existing apt repo state from gh-pages so reprepro can
       # append new versions without clobbering older ones. First-time
       # bootstrap (no gh-pages yet) falls back to an empty tree.
