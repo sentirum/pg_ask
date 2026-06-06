@@ -233,7 +233,17 @@ jobs:
           echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
           printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
           # Set ultimate trust so reprepro can sign non-interactively.
-          echo "${APT_GPG_KEY_ID}:6:" | gpg --import-ownertrust
+          # --import-ownertrust requires the full 40-char fingerprint, but
+          # APT_GPG_KEY_ID is a (short/long) key id, which gpg rejects with
+          # "invalid fingerprint". Derive the real fingerprint from the key
+          # we just imported so this works regardless of the secret's format.
+          FPR=$(gpg --batch --with-colons --fingerprint "$APT_GPG_KEY_ID" \
+                  | awk -F: '/^fpr:/ {print $10; exit}')
+          if [ -z "$FPR" ]; then
+            echo "::error::could not resolve fingerprint for key id $APT_GPG_KEY_ID"
+            exit 1
+          fi
+          echo "${FPR}:6:" | gpg --import-ownertrust
           gpg --list-secret-keys --keyid-format=long
 
       - name: Download all .deb artefacts
