@@ -102,6 +102,7 @@ jobs:
             ca-certificates curl gnupg2 \
             git gcc gcc-c++ make pkgconf-pkg-config \
             clang clang-devel llvm-devel \
+            openssl-devel \
             rpm-build rpmdevtools redhat-rpm-config \
             sudo which findutils
 
