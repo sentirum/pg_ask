@@ -329,6 +329,68 @@ CREATE INDEX IF NOT EXISTS _outbox_processed_idx
     ON ask._outbox (processed_at) WHERE processed_at IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
+-- Async job queue (v0.5.9 / ADR-0018).
+--
+-- `ask.ask_async(question)` enqueues a row here and returns its id
+-- immediately, so the calling backend is never blocked on an LLM round-trip.
+-- A background worker (or a manual ask.run_pending_jobs() / pg_cron call)
+-- claims pending rows, runs the agent loop in its OWN backend, and writes
+-- the answer back. This is the only correct shape for async work in
+-- PostgreSQL: a backend is single-threaded and SPI is not thread-safe, so
+-- "async" means "hand the work to a separate process", never "run it off-
+-- thread in the caller".
+--
+-- Durable state machine (status):
+--   pending  -> running -> done           (success)
+--                       -> failed         (terminal: attempts exhausted)
+--                       -> pending        (retry: transient failure, attempts left)
+--   pending/running -> cancelled          (owner cancels)
+--
+-- Crash safety: a worker that dies mid-job leaves the row in 'running' with
+-- a stale `started_at`. ask._jobs_recover_orphans() (called by the worker on
+-- startup and periodically) returns such rows to 'pending' once they exceed
+-- pg_ask.jobs_orphan_timeout_ms, so no job is lost to a crash. The durable
+-- table is the source of truth; pg_notify('pg_ask_jobs', id) is only a low-
+-- latency wake-up for the worker, and pg_notify('pg_ask_jobs_done', id) the
+-- same for a client awaiting the result.
+--
+-- Like _outbox: readable by PUBLIC's owner-scoped views only via the helper
+-- SRFs; all writes funnel through SECURITY DEFINER helpers that stamp
+-- session_user as the owner.
+CREATE TABLE IF NOT EXISTS ask._jobs (
+    id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    ts           timestamptz NOT NULL DEFAULT now(),
+    owner        name        NOT NULL DEFAULT session_user,
+    db           name        NOT NULL DEFAULT current_database(),
+    -- 'ask' | 'sql' — which agent mode to run (mirrors TraceKind).
+    kind         text        NOT NULL DEFAULT 'ask',
+    question     text        NOT NULL,
+    status       text        NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending','running','done','failed','cancelled')),
+    attempts     int         NOT NULL DEFAULT 0,
+    -- Worker lifecycle stamps.
+    started_at   timestamptz,
+    finished_at  timestamptz,
+    -- Result columns, filled on completion.
+    answer       text,
+    error        text,
+    prompt_tokens     bigint,
+    completion_tokens bigint,
+    -- Which backend PID claimed the job (diagnostics / orphan detection).
+    worker_pid   int
+);
+-- Worker hot path: "oldest pending job, FIFO". Partial index stays tiny
+-- even as done/failed history accumulates.
+CREATE INDEX IF NOT EXISTS _jobs_pending_idx
+    ON ask._jobs (ts) WHERE status = 'pending';
+-- Orphan recovery + per-DB worker scoping scan running rows by started_at.
+CREATE INDEX IF NOT EXISTS _jobs_running_idx
+    ON ask._jobs (started_at) WHERE status = 'running';
+-- Owner-scoped result lookups (ask.job_status / ask.job_result).
+CREATE INDEX IF NOT EXISTS _jobs_owner_idx
+    ON ask._jobs (owner, ts);
+
+-- ---------------------------------------------------------------------------
 -- SECURITY DEFINER helpers for internal-table writes.
 --
 -- Background (C3 in the v0.5.2 review): we previously granted
@@ -666,6 +728,254 @@ AS $$
     SELECT EXISTS (SELECT 1 FROM upd);
 $$;
 
+-- ===========================================================================
+-- Async job queue helpers (v0.5.9 / ADR-0018). All SECURITY DEFINER so an
+-- ordinary role can enqueue/inspect its own jobs without direct DML on
+-- ask._jobs; ownership is stamped + enforced from session_user inside each
+-- body (survives SECURITY DEFINER, see _sql_audit_insert rationale).
+-- ===========================================================================
+
+-- Enqueue a job. Honours pg_ask.jobs_enabled (no-op returning NULL when off,
+-- mirroring ask.emit) so an install that doesn't use async pays nothing.
+-- Validates kind + non-empty question. Fires pg_notify('pg_ask_jobs', id) so
+-- a listening worker wakes immediately; the durable row is the source of
+-- truth if no worker is up yet.
+CREATE OR REPLACE FUNCTION ask._job_submit(
+    kind     text,
+    question text
+) RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    enabled bool := COALESCE(current_setting('pg_ask.jobs_enabled', true)::bool, false);
+    norm    text := btrim(question);
+    new_id  uuid;
+BEGIN
+    IF NOT enabled THEN
+        RETURN NULL;
+    END IF;
+    IF kind IS NULL OR kind NOT IN ('ask','sql') THEN
+        RAISE EXCEPTION 'job kind must be ''ask'' or ''sql'', got %', kind
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF norm IS NULL OR norm = '' THEN
+        RAISE EXCEPTION 'job question must not be empty'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    INSERT INTO ask._jobs (owner, kind, question)
+    VALUES (session_user, kind, norm)
+    RETURNING id INTO new_id;
+    PERFORM pg_notify('pg_ask_jobs', new_id::text);
+    RETURN new_id;
+END
+$$;
+
+-- Claim the oldest pending job for THIS database, atomically. Uses
+-- FOR UPDATE SKIP LOCKED so concurrent workers never claim the same row and
+-- never block each other. Flips pending -> running, stamps started_at /
+-- worker_pid, bumps attempts. Returns the full job row (or no row when the
+-- queue is empty). Scoped to current_database() so a worker only ever runs
+-- jobs from the DB it is connected to (a bgworker binds to one DB).
+CREATE OR REPLACE FUNCTION ask._job_claim()
+RETURNS TABLE (id uuid, kind text, question text, attempts int)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    RETURN QUERY
+    WITH next AS (
+        SELECT j.id FROM ask._jobs j
+         WHERE j.status = 'pending'
+           AND j.db = current_database()
+         ORDER BY j.ts
+         FOR UPDATE SKIP LOCKED
+         LIMIT 1
+    )
+    UPDATE ask._jobs j
+       SET status     = 'running',
+           started_at = now(),
+           finished_at = NULL,
+           worker_pid = pg_backend_pid(),
+           attempts   = j.attempts + 1
+      FROM next
+     WHERE j.id = next.id
+    RETURNING j.id, j.kind, j.question, j.attempts;
+END
+$$;
+
+-- Mark a claimed job done with its answer + token usage. Only transitions a
+-- row that is still 'running' (a cancel mid-flight wins). Fires
+-- pg_notify('pg_ask_jobs_done', id) so a waiting client wakes.
+CREATE OR REPLACE FUNCTION ask._job_complete(
+    job_id      uuid,
+    p_answer    text,
+    p_prompt    bigint,
+    p_completion bigint
+) RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    n int;
+BEGIN
+    UPDATE ask._jobs
+       SET status = 'done',
+           answer = p_answer,
+           error = NULL,
+           prompt_tokens = p_prompt,
+           completion_tokens = p_completion,
+           finished_at = now()
+     WHERE id = job_id AND status = 'running';
+    GET DIAGNOSTICS n = ROW_COUNT;
+    IF n > 0 THEN
+        PERFORM pg_notify('pg_ask_jobs_done', job_id::text);
+    END IF;
+    RETURN n > 0;
+END
+$$;
+
+-- Mark a claimed job failed. If attempts remain (< max_attempts) the job is
+-- returned to 'pending' for retry; otherwise it is terminal 'failed'. Only
+-- acts on a 'running' row. `max_attempts` is passed by the caller (read from
+-- the GUC in Rust) so the policy lives in one place. Notifies done-channel
+-- only on terminal failure so a client awaiting a result isn't woken for a
+-- transient retry.
+CREATE OR REPLACE FUNCTION ask._job_fail(
+    job_id       uuid,
+    p_error      text,
+    max_attempts int
+) RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    cur_attempts int;
+    new_status   text;
+BEGIN
+    SELECT attempts INTO cur_attempts
+      FROM ask._jobs WHERE id = job_id AND status = 'running'
+      FOR UPDATE;
+    IF cur_attempts IS NULL THEN
+        RETURN NULL;  -- not running (already done/cancelled); no-op
+    END IF;
+    IF cur_attempts >= max_attempts THEN
+        new_status := 'failed';
+        UPDATE ask._jobs
+           SET status = 'failed', error = p_error, finished_at = now()
+         WHERE id = job_id;
+        PERFORM pg_notify('pg_ask_jobs_done', job_id::text);
+    ELSE
+        new_status := 'pending';
+        UPDATE ask._jobs
+           SET status = 'pending', error = p_error,
+               started_at = NULL, worker_pid = NULL
+         WHERE id = job_id;
+        PERFORM pg_notify('pg_ask_jobs', job_id::text);  -- re-wake a worker
+    END IF;
+    RETURN new_status;
+END
+$$;
+
+-- Crash recovery: return 'running' jobs whose started_at is older than
+-- `timeout_ms` back to 'pending' (their worker presumably died). Scoped to
+-- current_database(). Returns the number of jobs recovered. Idempotent.
+CREATE OR REPLACE FUNCTION ask._job_recover_orphans(
+    timeout_ms int
+) RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    n bigint;
+BEGIN
+    WITH revived AS (
+        UPDATE ask._jobs
+           SET status = 'pending', started_at = NULL, worker_pid = NULL
+         WHERE status = 'running'
+           AND db = current_database()
+           AND started_at < now() - make_interval(secs => timeout_ms / 1000.0)
+        RETURNING id
+    )
+    SELECT count(*) INTO n FROM revived;
+    RETURN n;
+END
+$$;
+
+-- Owner-scoped cancel. A job that is pending or running flips to
+-- 'cancelled'; the completion helpers refuse to transition a non-running
+-- row, so an in-flight worker's result is discarded. Returns true if it
+-- changed anything. Filtered by owner = session_user so a role can only
+-- cancel its own jobs.
+CREATE OR REPLACE FUNCTION ask._job_cancel(
+    job_id uuid
+) RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    n int;
+BEGIN
+    UPDATE ask._jobs
+       SET status = 'cancelled', finished_at = now()
+     WHERE id = job_id
+       AND owner = session_user
+       AND status IN ('pending','running');
+    GET DIAGNOSTICS n = ROW_COUNT;
+    RETURN n > 0;
+END
+$$;
+
+-- Delete terminal (done/failed/cancelled) jobs older than `older_than`,
+-- in batches — same retention pattern as ask._outbox_prune. Pending/running
+-- jobs are never touched. Operator-only.
+CREATE OR REPLACE FUNCTION ask._jobs_prune(
+    older_than interval,
+    batch_size int DEFAULT 10000
+) RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    total   bigint := 0;
+    removed bigint;
+BEGIN
+    IF batch_size IS NULL OR batch_size <= 0 THEN
+        WITH del AS (
+            DELETE FROM ask._jobs
+             WHERE status IN ('done','failed','cancelled')
+               AND finished_at < now() - older_than
+            RETURNING 1
+        )
+        SELECT count(*) INTO total FROM del;
+        RETURN total;
+    END IF;
+    LOOP
+        WITH cand AS (
+            SELECT id FROM ask._jobs
+             WHERE status IN ('done','failed','cancelled')
+               AND finished_at < now() - older_than
+             LIMIT batch_size
+        ), del AS (
+            DELETE FROM ask._jobs j USING cand
+             WHERE j.id = cand.id
+            RETURNING 1
+        )
+        SELECT count(*) INTO removed FROM del;
+        total := total + removed;
+        EXIT WHEN removed = 0;
+    END LOOP;
+    RETURN total;
+END
+$$;
+
 -- Insert a memory row owned by the calling role. The Rust caller passes
 -- the embedding as a text-encoded vector literal so we don't have to
 -- mention the pgvector type in this function's signature — keeps the
@@ -938,6 +1248,7 @@ GRANT SELECT ON ask._traces    TO PUBLIC;
 GRANT SELECT ON ask._tools     TO PUBLIC;
 GRANT SELECT ON ask._sql_audit TO PUBLIC;
 GRANT SELECT ON ask._outbox    TO PUBLIC;
+GRANT SELECT ON ask._jobs      TO PUBLIC;
 DO $grant_memory_select$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_class
@@ -960,6 +1271,16 @@ REVOKE ALL ON FUNCTION ask._outbox_mark_processed(uuid)                         
 -- surface). NOT granted to PUBLIC — operators grant it to a maintenance role
 -- after CREATE EXTENSION. See finalize.sql for the matching ask.prune_events.
 REVOKE ALL ON FUNCTION ask._outbox_prune(interval, int)                                   FROM PUBLIC;
+-- Async job helpers: enqueue / claim / complete / fail / recover / cancel are
+-- owner-scoped inside their bodies, so EXECUTE to PUBLIC is safe. _jobs_prune
+-- is destructive → operator-only (like _outbox_prune).
+REVOKE ALL ON FUNCTION ask._job_submit(text, text)                                        FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._job_claim()                                                   FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._job_complete(uuid, text, bigint, bigint)                      FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._job_fail(uuid, text, int)                                     FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._job_recover_orphans(int)                                      FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._job_cancel(uuid)                                              FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._jobs_prune(interval, int)                                     FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._memory_insert(text, text, jsonb, text)                        FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._memory_delete_owned(uuid)                                     FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._tool_register(text, jsonb, text)                              FROM PUBLIC;
@@ -991,6 +1312,19 @@ GRANT EXECUTE ON FUNCTION ask._session_append_message(uuid, text, text, text, te
 GRANT EXECUTE ON FUNCTION ask._session_touch(uuid)                                        TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._session_clear_messages(uuid)                               TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._config_get(text)                                           TO PUBLIC;
+-- Async job helpers (owner-scoped bodies). _job_claim / _job_complete /
+-- _job_fail / _job_recover_orphans are the worker's drain path; they are not
+-- owner-filtered (a worker runs jobs regardless of who enqueued them), which
+-- is why they live behind SECURITY DEFINER and are only reachable through the
+-- vetted Rust entry points. In an untrusted multi-tenant DB an operator can
+-- REVOKE these from PUBLIC and grant only to the worker/maintenance role;
+-- see docs/SECURITY.md.
+GRANT EXECUTE ON FUNCTION ask._job_submit(text, text)                                     TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._job_claim()                                                TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._job_complete(uuid, text, bigint, bigint)                   TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._job_fail(uuid, text, int)                                  TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._job_recover_orphans(int)                                   TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ask._job_cancel(uuid)                                           TO PUBLIC;
 
 -- Config-surface lockdown (C6) lives in a finalize SQL block in
 -- `sql/finalize.sql` because pgrx emits the #[pg_extern] config

@@ -58,6 +58,36 @@ pub static EVENTS_MAX_PER_MINUTE: GucSetting<i32> = GucSetting::<i32>::new(0);
 /// dedup (default). Enforced atomically in `ask._outbox_emit`.
 pub static EVENTS_DEDUP_WINDOW_MS: GucSetting<i32> = GucSetting::<i32>::new(0);
 
+// ---------- Async job queue (v0.5.9 / ADR-0018) ----------
+
+/// Master switch for the async job queue. When `false`, `ask.ask_async()`
+/// is a no-op returning NULL (mirroring `events_enabled`), so an install
+/// that doesn't use async pays nothing. Default `false` (opt-in).
+pub static JOBS_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// How many times a failed job is retried before it is marked `failed`. A
+/// transient failure (provider 5xx, timeout) returns the job to `pending`;
+/// once `attempts` reaches this, it is terminal. Minimum 1 (one attempt, no
+/// retry). Default 3.
+pub static JOBS_MAX_ATTEMPTS: GucSetting<i32> = GucSetting::<i32>::new(3);
+
+/// A `running` job whose `started_at` is older than this is considered
+/// orphaned (its worker died) and returned to `pending` by
+/// `ask._job_recover_orphans`. Should comfortably exceed the worst-case
+/// agent-loop runtime so a slow-but-alive job isn't reclaimed under it.
+/// Default 300000 (5 min). Plain integer ms (read via current_setting::int).
+pub static JOBS_ORPHAN_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(300_000);
+
+/// Maximum jobs a single `ask.run_pending_jobs()` / worker drain pass
+/// processes before returning, so one pass can't monopolise a worker. The
+/// worker loops again immediately if more remain. Default 10.
+pub static JOBS_BATCH: GucSetting<i32> = GucSetting::<i32>::new(10);
+
+/// Background-worker poll interval in ms: how often each per-database worker
+/// wakes to drain the queue and recover orphans even without a NOTIFY (a
+/// safety net against a missed wake-up). Default 5000. Plain integer ms.
+pub static JOBS_POLL_INTERVAL_MS: GucSetting<i32> = GucSetting::<i32>::new(5_000);
+
 /// Soft cap on the schema dump injected into the system prompt, measured
 /// in characters (a rough proxy for tokens at ~4 chars/token).
 ///
@@ -337,6 +367,11 @@ const KNOWN_KEYS: &[&str] = &[
     "events_max_payload_bytes",
     "events_max_per_minute",
     "events_dedup_window_ms",
+    "jobs_enabled",
+    "jobs_max_attempts",
+    "jobs_orphan_timeout_ms",
+    "jobs_batch",
+    "jobs_poll_interval_ms",
     "schema_char_budget",
     "embedding_provider",
     "embedding_api_key",

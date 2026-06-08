@@ -35,3 +35,10 @@ REVOKE ALL ON FUNCTION ask.get_config(text)       FROM PUBLIC;
 --   GRANT EXECUTE ON FUNCTION ask.prune_events(text, int) TO maintenance_role;
 -- ---------------------------------------------------------------------------
 REVOKE ALL ON FUNCTION ask.prune_events(text, int) FROM PUBLIC;
+
+-- ---------------------------------------------------------------------------
+-- ask.prune_jobs(interval-text, int) deletes terminal async jobs. Same
+-- destructive-maintenance rationale as prune_events → operator-only.
+--   GRANT EXECUTE ON FUNCTION ask.prune_jobs(text, int) TO maintenance_role;
+-- ---------------------------------------------------------------------------
+REVOKE ALL ON FUNCTION ask.prune_jobs(text, int) FROM PUBLIC;
