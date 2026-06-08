@@ -15,6 +15,7 @@ Cargo.lock.bak
 !/sql/pg_ask--0.5.4--0.5.5.sql
 !/sql/pg_ask--0.5.5--0.5.6.sql
 !/sql/pg_ask--0.5.6--0.5.7.sql
+!/sql/pg_ask--0.5.7--0.5.8.sql
 /target-*
 
 # Packaging build outputs (deb/rpm/apk staging + artefacts)

@@ -1,6 +1,6 @@
 [package]
 name = "pg_ask"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2021"
 rust-version = "1.82"
 # ^ Minimum Supported Rust Version. pgrx 0.18 requires 1.82+.

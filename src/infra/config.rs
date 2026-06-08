@@ -36,9 +36,27 @@ pub static TRACE_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// Master switch for the event outbox (ADR-0017). When `false`,
 /// `ask.emit()` is a no-op returning NULL, so an install that doesn't use
 /// reverse notifications pays nothing and exposes no channel. Default
-/// `false` (opt-in): emitting events is only useful when a listener (senti)
-/// is actually consuming them.
+/// `false` (opt-in): emitting events is only useful when a downstream
+/// `LISTEN pg_ask_events` consumer is actually draining them.
 pub static EVENTS_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// Max serialized-JSON bytes accepted for an `ask.emit()` payload. Guards
+/// the outbox against a runaway trigger writing multi-megabyte rows. `<= 0`
+/// disables the check (operator opt-out). Default 64 KiB — comfortably
+/// above any sane event body, well below a memory/IO concern.
+pub static EVENTS_MAX_PAYLOAD_BYTES: GucSetting<i32> = GucSetting::<i32>::new(65_536);
+
+/// Per-(emitter, event) rate limit for `ask.emit()`, in emits per rolling
+/// minute. Beyond this the emit is a silent no-op (the row is NOT written),
+/// so a trigger flooding on every INSERT can't blow up the outbox. `<= 0`
+/// disables the limit (default). Enforced atomically in `ask._outbox_emit`.
+pub static EVENTS_MAX_PER_MINUTE: GucSetting<i32> = GucSetting::<i32>::new(0);
+
+/// Dedup window for `ask.emit()`, in milliseconds. Within the window, a
+/// second emit with the same (emitter, event, payload) is a silent no-op,
+/// collapsing duplicate alerts from a chatty trigger. `<= 0` disables
+/// dedup (default). Enforced atomically in `ask._outbox_emit`.
+pub static EVENTS_DEDUP_WINDOW_MS: GucSetting<i32> = GucSetting::<i32>::new(0);
 
 /// Soft cap on the schema dump injected into the system prompt, measured
 /// in characters (a rough proxy for tokens at ~4 chars/token).
@@ -316,6 +334,9 @@ const KNOWN_KEYS: &[&str] = &[
     "tool_max_rows",
     "trace_enabled",
     "events_enabled",
+    "events_max_payload_bytes",
+    "events_max_per_minute",
+    "events_dedup_window_ms",
     "schema_char_budget",
     "embedding_provider",
     "embedding_api_key",

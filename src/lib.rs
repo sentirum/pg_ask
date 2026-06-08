@@ -209,6 +209,40 @@ pub extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
     GucRegistry::define_int_guc(
+        c"pg_ask.events_max_payload_bytes",
+        c"Max serialized-JSON bytes for an ask.emit() payload (0 = unlimited)",
+        c"Oversized payloads are rejected before any outbox row is written.",
+        &EVENTS_MAX_PAYLOAD_BYTES,
+        0,
+        1_073_741_824,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_ask.events_max_per_minute",
+        c"Per-(emitter,event) ask.emit() rate limit per rolling minute (0 = off)",
+        c"Beyond the limit the emit is a silent no-op; the surrounding \
+          trigger transaction is never aborted.",
+        &EVENTS_MAX_PER_MINUTE,
+        0,
+        1_000_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_ask.events_dedup_window_ms",
+        c"ask.emit() dedup window in ms for identical (emitter,event,payload) (0 = off)",
+        c"Within the window a duplicate emit is a silent no-op. Plain integer \
+          milliseconds (e.g. 60000), NOT a unit-suffixed value: the SQL-side \
+          writer reads this via current_setting()::int, which a UNIT_MS GUC \
+          would break by normalizing 60000 to '1min'.",
+        &EVENTS_DEDUP_WINDOW_MS,
+        0,
+        86_400_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
         c"pg_ask.schema_char_budget",
         c"Soft cap on schema dump injected into the system prompt (characters).",
         c"When the full render exceeds this, falls back to a tables-only listing \
@@ -433,6 +467,238 @@ mod tests {
         let second: Option<bool> =
             Spi::get_one_with_args("SELECT ask._outbox_mark_processed($1)", &[id.into()]).unwrap();
         assert_eq!(second, Some(false));
+    }
+
+    #[pg_test]
+    fn emit_rejects_invalid_event_name() {
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        // Whitespace / illegal chars are rejected before any write.
+        let res = std::panic::catch_unwind(|| {
+            Spi::get_one::<pgrx::Uuid>("SELECT ask.emit('bad name!', '{}'::jsonb)")
+        });
+        assert!(res.is_err(), "event name with space/!@ must raise");
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
+        assert_eq!(n, Some(0), "no row written on validation failure");
+    }
+
+    #[pg_test]
+    fn emit_summary_ceiling_is_bytes_not_chars() {
+        // D1 regression: the summary ceiling is measured in BYTES on both
+        // layers (Rust dropped its own check; SQL uses octet_length). A
+        // multi-byte string just under 8192 chars but over 8192 bytes must
+        // be rejected consistently — no Rust/SQL drift.
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        // 'ş' is 2 bytes in UTF-8. 5000 of them = 10000 bytes, 5000 chars.
+        let res = std::panic::catch_unwind(|| {
+            Spi::get_one::<pgrx::Uuid>("SELECT ask.emit('s.evt', '{}'::jsonb, repeat('ş', 5000))")
+        });
+        assert!(
+            res.is_err(),
+            "summary over 8192 BYTES must raise even if < 8192 chars"
+        );
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
+        assert_eq!(n, Some(0), "no row written when summary too large");
+    }
+
+    #[pg_test]
+    fn emit_rejects_oversized_payload() {
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        Spi::run("SET pg_ask.events_max_payload_bytes = 64").unwrap();
+        // A payload whose serialized form exceeds 64 bytes must raise.
+        let res = std::panic::catch_unwind(|| {
+            Spi::get_one::<pgrx::Uuid>(
+                "SELECT ask.emit('x.y', jsonb_build_object('blob', repeat('a', 200)))",
+            )
+        });
+        assert!(res.is_err(), "oversized payload must raise");
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
+        assert_eq!(n, Some(0), "no row written when payload too large");
+    }
+
+    #[pg_test]
+    fn emit_dedup_window_collapses_duplicates() {
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        Spi::run("SET pg_ask.events_dedup_window_ms = 60000").unwrap();
+        // First emit writes a row.
+        let first: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask.emit('dup.event', '{\"a\": 1}'::jsonb)").unwrap();
+        assert!(first.is_some(), "first emit writes");
+        // Identical (emitter,event,payload) within the window → silent no-op.
+        let second: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask.emit('dup.event', '{\"a\": 1}'::jsonb)").unwrap();
+        assert!(second.is_none(), "duplicate within window is suppressed");
+        // A different payload is NOT a duplicate → writes.
+        let third: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask.emit('dup.event', '{\"a\": 2}'::jsonb)").unwrap();
+        assert!(third.is_some(), "distinct payload is not deduped");
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
+        assert_eq!(n, Some(2), "exactly two rows written");
+    }
+
+    #[pg_test]
+    fn emit_rate_limit_suppresses_excess() {
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        Spi::run("SET pg_ask.events_max_per_minute = 2").unwrap();
+        // Distinct payloads so dedup (off here) is irrelevant; same event so
+        // they share the rate-limit key.
+        let a: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask.emit('rl.event', '{\"i\": 1}'::jsonb)").unwrap();
+        let b: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask.emit('rl.event', '{\"i\": 2}'::jsonb)").unwrap();
+        let c: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask.emit('rl.event', '{\"i\": 3}'::jsonb)").unwrap();
+        assert!(a.is_some() && b.is_some(), "first two within limit");
+        assert!(c.is_none(), "third over the per-minute cap is suppressed");
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
+        assert_eq!(n, Some(2), "only two rows survive the rate limit");
+    }
+
+    #[pg_test]
+    fn prune_events_removes_only_delivered() {
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        // One row we deliver+age, one we leave pending.
+        let delivered: pgrx::Uuid = Spi::get_one("SELECT ask.emit('p.delivered', '{}'::jsonb)")
+            .unwrap()
+            .unwrap();
+        let _pending: pgrx::Uuid = Spi::get_one("SELECT ask.emit('p.pending', '{}'::jsonb)")
+            .unwrap()
+            .unwrap();
+        // Mark the first processed and backdate it past the prune horizon.
+        Spi::get_one_with_args::<bool>(
+            "SELECT ask._outbox_mark_processed($1)",
+            &[delivered.into()],
+        )
+        .unwrap();
+        Spi::run_with_args(
+            "UPDATE ask._outbox SET processed_at = now() - interval '10 days' WHERE id = $1",
+            &[delivered.into()],
+        )
+        .unwrap();
+        // Prune everything delivered older than 7 days.
+        let removed: Option<i64> = Spi::get_one("SELECT ask.prune_events('7 days')").unwrap();
+        assert_eq!(removed, Some(1), "one delivered+aged row pruned");
+        // The pending row is untouched.
+        let remaining: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
+        assert_eq!(remaining, Some(1), "pending row survives prune");
+        let ev: Option<String> = Spi::get_one("SELECT event FROM ask._outbox").unwrap();
+        assert_eq!(ev.as_deref(), Some("p.pending"));
+    }
+
+    #[pg_test]
+    fn outbox_emit_direct_call_respects_disabled_switch() {
+        // B2: the enabled-check must live in _outbox_emit, not only in the
+        // Rust wrapper — otherwise a direct helper call bypasses it.
+        Spi::run("SET pg_ask.events_enabled = off").unwrap();
+        let id: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask._outbox_emit('direct.evt', '{}'::jsonb, NULL)").unwrap();
+        assert!(id.is_none(), "direct _outbox_emit must no-op when disabled");
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
+        assert_eq!(n, Some(0), "no row written via direct call when disabled");
+    }
+
+    #[pg_test]
+    fn outbox_emit_direct_call_validates_event_name() {
+        // B2: validation must live in _outbox_emit so a direct call can't
+        // smuggle a newline-laced / illegal event name past the Rust checks.
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        let res = std::panic::catch_unwind(|| {
+            Spi::get_one::<pgrx::Uuid>("SELECT ask._outbox_emit(E'bad\\nname', '{}'::jsonb, NULL)")
+        });
+        assert!(
+            res.is_err(),
+            "direct call with newline event name must raise"
+        );
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
+        assert_eq!(
+            n,
+            Some(0),
+            "no row written on direct-call validation failure"
+        );
+    }
+
+    #[pg_test]
+    fn outbox_emit_direct_call_enforces_payload_ceiling() {
+        // B2: payload ceiling enforced in SQL, not just Rust.
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        Spi::run("SET pg_ask.events_max_payload_bytes = 64").unwrap();
+        let res = std::panic::catch_unwind(|| {
+            Spi::get_one::<pgrx::Uuid>(
+                "SELECT ask._outbox_emit('x.y', jsonb_build_object('b', repeat('a', 200)), NULL)",
+            )
+        });
+        assert!(
+            res.is_err(),
+            "direct call with oversized payload must raise"
+        );
+    }
+
+    #[pg_test]
+    fn emit_fires_notify_without_error() {
+        // The NOTIFY is now fired inside _outbox_emit. pgrx tests run in a
+        // single transaction, so the notification is never delivered to a
+        // client and can't be asserted directly — but the pg_notify call is
+        // exercised on every emit, and a failure there (e.g. a bad channel
+        // or a shadowed function) would surface as an ERROR from emit. A
+        // clean id return is the evidence the NOTIFY path ran.
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        Spi::run("LISTEN pg_ask_events").unwrap();
+        let id: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask.emit('notify.evt', '{}'::jsonb)").unwrap();
+        assert!(
+            id.is_some(),
+            "emit returns an id; NOTIFY path ran without error"
+        );
+    }
+
+    #[pg_test]
+    fn event_channel_constant_is_stable() {
+        // The consumer (senti listener) hard-codes 'pg_ask_events'. Guard the
+        // contract so a rename is caught at test time.
+        assert_eq!(crate::infra::events::EVENT_CHANNEL, "pg_ask_events");
+    }
+
+    #[pg_test]
+    fn prune_events_batched_removes_all_eligible() {
+        // H4: with a small batch size the loop must still remove every
+        // eligible row, not just one batch.
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        for i in 0..5 {
+            let id: pgrx::Uuid = Spi::get_one(&format!(
+                "SELECT ask.emit('b.evt', jsonb_build_object('i', {i}))"
+            ))
+            .unwrap()
+            .unwrap();
+            Spi::get_one_with_args::<bool>("SELECT ask._outbox_mark_processed($1)", &[id.into()])
+                .unwrap();
+        }
+        // Age them all past the horizon.
+        Spi::run("UPDATE ask._outbox SET processed_at = now() - interval '10 days'").unwrap();
+        // Batch size 2 over 5 rows → must still delete all 5.
+        let removed: Option<i64> = Spi::get_one("SELECT ask.prune_events('7 days', 2)").unwrap();
+        assert_eq!(removed, Some(5), "batched prune removes every eligible row");
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
+        assert_eq!(n, Some(0));
+    }
+
+    #[pg_test]
+    fn emit_dedup_is_key_order_insensitive() {
+        // H1: dedup compares md5(payload::text); jsonb normalizes key order
+        // before the cast, so the same logical payload with reordered keys
+        // must be treated as a duplicate.
+        Spi::run("SET pg_ask.events_enabled = on").unwrap();
+        Spi::run("SET pg_ask.events_dedup_window_ms = 60000").unwrap();
+        let first: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask.emit('dk.evt', '{\"a\": 1, \"b\": 2}'::jsonb)").unwrap();
+        assert!(first.is_some());
+        // Same content, reversed key order → deduped.
+        let second: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask.emit('dk.evt', '{\"b\": 2, \"a\": 1}'::jsonb)").unwrap();
+        assert!(
+            second.is_none(),
+            "reordered-key duplicate must be suppressed"
+        );
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
+        assert_eq!(n, Some(1));
     }
 
     /// Configure every fixture-driven test the same way: pick the

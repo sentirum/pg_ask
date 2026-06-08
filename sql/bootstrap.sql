@@ -278,10 +278,11 @@ CREATE INDEX IF NOT EXISTS _sql_audit_ts_idx     ON ask._sql_audit (ts DESC);
 CREATE INDEX IF NOT EXISTS _sql_audit_caller_idx ON ask._sql_audit (caller, ts DESC);
 
 -- ---------------------------------------------------------------------------
--- Event outbox (ADR-0017: pg_ask -> senti reverse notifications).
+-- Event outbox (ADR-0017: in-database reverse notifications).
 --
 -- `ask.emit(event, payload)` appends a durable row here and fires
--- `pg_notify('pg_ask_events', <id>)`. An external orchestrator (senti)
+-- `pg_notify('pg_ask_events', <id>)`. An external orchestrator (any
+-- process holding a LISTEN pg_ask_events connection)
 -- LISTENs on that channel and drains unprocessed rows, marking
 -- `processed_at`. The durable table is the source of truth; NOTIFY is
 -- only a low-latency wake-up, so no event is lost if the listener is
@@ -309,6 +310,23 @@ CREATE TABLE IF NOT EXISTS ask._outbox (
 -- index keeps it tiny even when the table accumulates processed history.
 CREATE INDEX IF NOT EXISTS _outbox_pending_idx
     ON ask._outbox (ts) WHERE processed_at IS NULL;
+-- Flood-control hot path (v0.5.8): the rate-limit and dedup checks in
+-- ask._outbox_emit filter by (emitter, event, ts). Without this index those
+-- guards degrade to a full scan of the whole outbox (including delivered
+-- history) on every emit — turning the DoS protection into a DoS amplifier
+-- on a large table. Cheap to maintain; only matters when a guard is on.
+-- Not partial: the dedup/rate checks must see recent rows regardless of
+-- processed status, so the index necessarily covers history too and grows
+-- with the unpruned outbox — another reason to run ask.prune_events().
+CREATE INDEX IF NOT EXISTS _outbox_rate_idx
+    ON ask._outbox (emitter, event, ts);
+-- Retention hot path (v0.5.8): ask._outbox_prune deletes delivered rows by
+-- `processed_at < cutoff`. A partial index on the delivered rows serves the
+-- prune scan directly (the pending partial index above has the opposite
+-- predicate and can't help) and stays small — it only indexes rows that are
+-- candidates for deletion.
+CREATE INDEX IF NOT EXISTS _outbox_processed_idx
+    ON ask._outbox (processed_at) WHERE processed_at IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- SECURITY DEFINER helpers for internal-table writes.
@@ -391,23 +409,228 @@ BEGIN
 END
 $$;
 
--- Event outbox writer (ADR-0017). Appends one row and returns its id so
--- the caller can fire pg_notify('pg_ask_events', id). SECURITY DEFINER so
--- ordinary roles can emit without direct INSERT on ask._outbox; the row is
--- stamped with session_user as the emitter (survives SECURITY DEFINER, see
--- the _sql_audit_insert rationale above).
+-- Event outbox writer (ADR-0017). The SINGLE authority for appending an
+-- event: it validates input, honours the on/off switch, enforces flood
+-- control, writes the durable row, AND fires the NOTIFY — all atomically in
+-- one SECURITY DEFINER call. Returns the new id, or NULL when the emit was a
+-- no-op (events disabled, or suppressed by a guard).
+--
+-- Why everything lives here, not in the Rust caller (v0.5.8 B2 fix): this
+-- function is GRANTed to PUBLIC so ordinary roles can emit without direct
+-- INSERT on ask._outbox. If validation / the enabled-check / NOTIFY lived
+-- only in ask.emit (the #[pg_extern]), a caller could bypass all of it by
+-- invoking ask._outbox_emit() directly — writing a newline-laced event name,
+-- a multi-megabyte payload, or a row while events are globally disabled. By
+-- making the helper self-contained, BOTH entry points are protected and the
+-- Rust layer is pure defense-in-depth (nicer error messages, early exit).
+-- session_user survives SECURITY DEFINER, so the row is still billed to the
+-- original connecting role (see _sql_audit_insert).
+--
+-- Flood control. Two optional, GUC-driven guards run BEFORE the INSERT:
+--   * pg_ask.events_max_per_minute  — per-(emitter,event) rate cap.
+--   * pg_ask.events_dedup_window_ms — collapse identical
+--                                     (emitter,event,payload) repeats.
+-- Both default to 0 (off). A suppressed emit returns NULL WITHOUT writing a
+-- row and does NOT raise: emit runs inside the caller's (often a trigger's)
+-- transaction, and an ERROR here would roll back the very INSERT/UPDATE that
+-- fired it. Suppressions are surfaced via RAISE DEBUG so an operator can see
+-- them with log_min_messages=debug1 without paying anything in production.
+--
+-- Atomicity: a plain count-then-insert is racy under concurrency (two
+-- backends both pass the cap before either commits, since uncommitted rows
+-- aren't mutually visible). We serialize same-key emitters with a
+-- transaction-scoped advisory lock keyed on (emitter,event); it is released
+-- automatically at commit/rollback and is only taken when a guard is active,
+-- so the unguarded fast path pays nothing.
+--
+-- Validation is owned entirely here (the single authority); the Rust caller
+-- does no size/charset checks, so there is nothing to drift out of sync.
+-- event: non-empty, <= 127 chars, ^[A-Za-z0-9][A-Za-z0-9._:-]*$ (ASCII, so
+-- char count == byte count). summary: <= 8192 BYTES (octet_length, so the
+-- ceiling is exact for multi-byte text). payload: <= the
+-- pg_ask.events_max_payload_bytes serialized-JSON bytes (0 disables).
 CREATE OR REPLACE FUNCTION ask._outbox_emit(
     event   text,
     payload jsonb,
     summary text
 ) RETURNS uuid
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
+DECLARE
+    enabled      bool := COALESCE(current_setting('pg_ask.events_enabled', true)::bool, false);
+    max_per_min  int  := COALESCE(NULLIF(current_setting('pg_ask.events_max_per_minute', true), '')::int, 0);
+    dedup_ms     int  := COALESCE(NULLIF(current_setting('pg_ask.events_dedup_window_ms', true), '')::int, 0);
+    max_payload  int  := COALESCE(NULLIF(current_setting('pg_ask.events_max_payload_bytes', true), '')::int, 65536);
+    trimmed      text := btrim(event);
+    norm_payload jsonb := COALESCE(payload, '{}'::jsonb);
+    payload_len  int;
+    new_id       uuid;
+BEGIN
+    -- Global off switch (also enforced in Rust; duplicated so a direct
+    -- _outbox_emit call can't write while events are disabled).
+    IF NOT enabled THEN
+        RETURN NULL;
+    END IF;
+
+    -- ---- Validation (caller bugs → hard error, before any write) --------
+    IF trimmed IS NULL OR trimmed = '' THEN
+        RAISE EXCEPTION 'event name must not be empty'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF length(trimmed) > 127 THEN
+        RAISE EXCEPTION 'event name must be <= 127 chars, got %', length(trimmed)
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF trimmed !~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$' THEN
+        RAISE EXCEPTION 'event name must start alphanumeric and contain only [A-Za-z0-9._:-]'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF summary IS NOT NULL AND octet_length(summary) > 8192 THEN
+        RAISE EXCEPTION 'summary must be <= 8192 bytes, got %', octet_length(summary)
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF max_payload > 0 THEN
+        payload_len := octet_length(norm_payload::text);
+        IF payload_len > max_payload THEN
+            RAISE EXCEPTION 'payload must be <= % bytes, got %', max_payload, payload_len
+                USING ERRCODE = 'invalid_parameter_value';
+        END IF;
+    END IF;
+
+    -- ---- Flood control --------------------------------------------------
+    IF max_per_min > 0 OR dedup_ms > 0 THEN
+        -- Serialize same-key emitters so the checks below are not subject to
+        -- a check-then-insert race. Transaction-scoped advisory lock, freed
+        -- automatically at commit/rollback.
+        --
+        -- Two-argument (int4, int4) form: the FIRST arg is a fixed domain
+        -- ('pg_ask._outbox') and the SECOND is the (emitter, event) key.
+        -- Postgres keeps the two-arg lock space wholly separate from the
+        -- one-arg int8 space, so this can never collide with the int8
+        -- session lock in ask._session_lock_for_append. Within this domain a
+        -- collision only happens for the same (emitter, event) — exactly the
+        -- pairs we mean to serialize.
+        --
+        -- hashtextextended returns bigint; the two-arg lock takes int4, so we
+        -- mask to the low 31 bits (& 0x7fffffff) to land in a non-negative
+        -- int4 instead of casting (which raises "integer out of range" for
+        -- hashes outside int4's range).
+        PERFORM pg_advisory_xact_lock(
+            (hashtextextended('pg_ask._outbox', 0) & 2147483647)::int,
+            (hashtextextended(session_user::text || '|' || trimmed, 0) & 2147483647)::int
+        );
+    END IF;
+
+    -- Dedup: identical (emitter,event,payload) within the window → no-op.
+    -- Compared via md5(payload::text) rather than the jsonb `=` operator:
+    -- jsonb normalizes (key order / whitespace) before text-casting, so the
+    -- hash is stable for logically-equal payloads, and hashing a short text
+    -- digest is far cheaper than an equality scan over large jsonb values.
+    IF dedup_ms > 0 THEN
+        IF EXISTS (
+            SELECT 1 FROM ask._outbox o
+             WHERE o.emitter = session_user
+               AND o.event   = trimmed
+               AND o.ts > now() - make_interval(secs => dedup_ms / 1000.0)
+               AND md5(o.payload::text) = md5(norm_payload::text)
+        ) THEN
+            RAISE DEBUG 'pg_ask: emit deduped (emitter=%, event=%)', session_user, trimmed;
+            RETURN NULL;
+        END IF;
+    END IF;
+
+    -- Rate limit: per (emitter,event) over the last rolling minute.
+    IF max_per_min > 0 THEN
+        IF (SELECT count(*) FROM ask._outbox o
+             WHERE o.emitter = session_user
+               AND o.event   = trimmed
+               AND o.ts > now() - interval '1 minute') >= max_per_min THEN
+            RAISE DEBUG 'pg_ask: emit rate-limited (emitter=%, event=%, cap=%/min)',
+                session_user, trimmed, max_per_min;
+            RETURN NULL;
+        END IF;
+    END IF;
+
+    -- ---- Durable append + low-latency wake-up (atomic) ------------------
     INSERT INTO ask._outbox (emitter, event, payload, summary)
-    VALUES (session_user, event, COALESCE(payload, '{}'::jsonb), summary)
-    RETURNING id;
+    VALUES (session_user, trimmed, norm_payload, summary)
+    RETURNING id INTO new_id;
+
+    -- NOTIFY carries only the id (pg_notify's payload is 8 KB capped); the
+    -- listener reads the full row from the outbox. Fired here so a direct
+    -- _outbox_emit caller can't write a row without waking listeners.
+    PERFORM pg_notify('pg_ask_events', new_id::text);
+
+    RETURN new_id;
+END
+$$;
+
+-- Retention helper (v0.5.8). Deletes outbox rows that have ALREADY been
+-- delivered (processed_at IS NOT NULL) and are older than `older_than`.
+-- Pending rows are never touched, so a slow/offline consumer can't lose
+-- undelivered events to a prune. Returns the number of rows removed.
+--
+-- Batched (H4): the first prune on a long-neglected outbox could otherwise
+-- delete millions of rows in ONE statement. We instead delete in chunks of
+-- `batch_size`, which bounds the size of each individual DELETE — capping
+-- per-statement memory, lock acquisition, and dead-tuple churn, and letting
+-- autovacuum interleave more easily.
+--
+-- HONEST LIMITATION: this is a plpgsql function, whose whole body runs in
+-- the caller's single transaction. The loop therefore does NOT commit
+-- between batches — all chunks become durable together at the outer COMMIT,
+-- so total WAL volume and the lifetime of the accumulated row locks are the
+-- same as one big DELETE. To get per-batch commits (genuinely shorter locks
+-- and incremental WAL flush) the caller must invoke this repeatedly from
+-- separate transactions, or a future version must expose a PROCEDURE that
+-- can COMMIT mid-loop. The batching here is still worthwhile for the
+-- per-statement bounds above. `batch_size <= 0` falls back to a single
+-- unbounded DELETE.
+-- SECURITY DEFINER so an operator/maintenance role can prune without owning
+-- the table; exposed to callers via ask.prune_events(interval, int).
+CREATE OR REPLACE FUNCTION ask._outbox_prune(
+    older_than interval,
+    batch_size int DEFAULT 10000
+) RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    total   bigint := 0;
+    removed bigint;
+BEGIN
+    IF batch_size IS NULL OR batch_size <= 0 THEN
+        WITH del AS (
+            DELETE FROM ask._outbox
+             WHERE processed_at IS NOT NULL
+               AND processed_at < now() - older_than
+            RETURNING 1
+        )
+        SELECT count(*) INTO total FROM del;
+        RETURN total;
+    END IF;
+
+    LOOP
+        WITH cand AS (
+            SELECT id FROM ask._outbox
+             WHERE processed_at IS NOT NULL
+               AND processed_at < now() - older_than
+             LIMIT batch_size
+        ), del AS (
+            DELETE FROM ask._outbox o
+             USING cand
+             WHERE o.id = cand.id
+            RETURNING 1
+        )
+        SELECT count(*) INTO removed FROM del;
+        total := total + removed;
+        EXIT WHEN removed = 0;
+    END LOOP;
+    RETURN total;
+END
 $$;
 
 -- Consumer-side: stamp a delivered row as processed. Idempotent (only
@@ -415,8 +638,8 @@ $$;
 -- listener can tell a fresh delivery from a duplicate wake-up. SECURITY
 -- DEFINER because the designated consumer role need not own the table.
 --
--- Deliberately NOT filtered by emitter: the consumer (e.g. a senti
--- listener) almost always connects as a DIFFERENT role than the one that
+-- Deliberately NOT filtered by emitter: the consumer (a LISTEN
+-- pg_ask_events drainer) almost always connects as a DIFFERENT role than the one that
 -- emitted the event (a trigger fires as the app role; the listener uses a
 -- dedicated reader DSN). An `emitter = session_user` filter would make the
 -- consumer unable to stamp those rows, causing infinite re-delivery. The
@@ -733,6 +956,10 @@ REVOKE ALL ON FUNCTION ask._sql_audit_insert(text, int, bool, text)             
 REVOKE ALL ON FUNCTION ask._sql_audit_finish(uuid, bigint, text)                          FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._outbox_emit(text, jsonb, text)                                FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._outbox_mark_processed(uuid)                                   FROM PUBLIC;
+-- _outbox_prune deletes delivered rows; kept operator-only (like the config
+-- surface). NOT granted to PUBLIC — operators grant it to a maintenance role
+-- after CREATE EXTENSION. See finalize.sql for the matching ask.prune_events.
+REVOKE ALL ON FUNCTION ask._outbox_prune(interval, int)                                   FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._memory_insert(text, text, jsonb, text)                        FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._memory_delete_owned(uuid)                                     FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._tool_register(text, jsonb, text)                              FROM PUBLIC;
