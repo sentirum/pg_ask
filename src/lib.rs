@@ -766,6 +766,7 @@ mod tests {
     #[pg_test]
     fn ask_async_enqueues_pending_job() {
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let id: Option<pgrx::Uuid> =
             Spi::get_one("SELECT ask.ask_async('count rows', 'sql')").unwrap();
         assert!(id.is_some(), "ask_async returns a job id when enabled");
@@ -780,6 +781,7 @@ mod tests {
     #[pg_test]
     fn ask_async_rejects_bad_kind() {
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let res = std::panic::catch_unwind(|| {
             Spi::get_one::<pgrx::Uuid>("SELECT ask.ask_async('q', 'bogus')")
         });
@@ -789,12 +791,22 @@ mod tests {
     #[pg_test]
     fn job_claim_is_atomic_and_fifo() {
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let first: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('first', 'sql')")
             .unwrap()
             .unwrap();
         let _second: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('second', 'sql')")
             .unwrap()
             .unwrap();
+        // Both rows get ts = now() (the statement timestamp is fixed within a
+        // pg_test's single transaction), so `(ts, id)` would otherwise fall
+        // back to the random uuid for ordering. Make `first` unambiguously
+        // older so the FIFO assertion is deterministic.
+        Spi::run_with_args(
+            "UPDATE ask._jobs SET ts = ts - interval '1 second' WHERE id = $1",
+            &[first.into()],
+        )
+        .unwrap();
         // Claim once → oldest (first) flips to running.
         let claimed: Option<pgrx::Uuid> = Spi::get_one("SELECT id FROM ask._job_claim()").unwrap();
         assert_eq!(claimed, Some(first), "claim returns the oldest pending job");
@@ -816,6 +828,7 @@ mod tests {
     #[pg_test]
     fn job_complete_only_acts_on_running() {
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
             .unwrap()
             .unwrap();
@@ -841,6 +854,7 @@ mod tests {
     #[pg_test]
     fn job_fail_retries_then_terminal() {
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
             .unwrap()
             .unwrap();
@@ -864,6 +878,7 @@ mod tests {
     #[pg_test]
     fn job_recover_orphans_revives_stale_running() {
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
             .unwrap()
             .unwrap();
@@ -886,6 +901,7 @@ mod tests {
     #[pg_test]
     fn job_cancel_blocks_completion() {
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
             .unwrap()
             .unwrap();
@@ -914,6 +930,7 @@ mod tests {
         // worker" by claiming (stamping our pid), then rewriting worker_pid
         // to a different value, then completing — it must be a no-op.
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
             .unwrap()
             .unwrap();
@@ -939,6 +956,7 @@ mod tests {
         // M1: _job_release flips our running claim back to pending without
         // consuming an attempt.
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
             .unwrap()
             .unwrap();
@@ -970,6 +988,7 @@ mod tests {
         // H1 regression: with jobs disabled, run_pending_jobs returns 0 and
         // does NOT run orphan recovery (a running row stays running).
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
             .unwrap()
             .unwrap();
@@ -998,6 +1017,7 @@ mod tests {
         // Privilege isolation: claim must expose the enqueuing owner so the
         // worker can SET ROLE to it before running the agent loop.
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         Spi::get_one::<pgrx::Uuid>("SELECT ask.ask_async('q', 'sql')")
             .unwrap()
             .unwrap();
@@ -1014,6 +1034,7 @@ mod tests {
         // job, drain it synchronously, and assert the answer landed.
         use_fixture("sql_only");
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('count rows', 'sql')")
             .unwrap()
             .unwrap();
@@ -1038,6 +1059,7 @@ mod tests {
         // "SpiTupleTable positioned before the start" error. This is the
         // NotFound == Unauthorized collapse the rest of pg_ask relies on.
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         let bogus = "00000000-0000-0000-0000-000000000000";
         let st: Option<String> =
             Spi::get_one(&format!("SELECT ask.job_status('{bogus}'::uuid)")).unwrap();
@@ -1063,6 +1085,7 @@ mod tests {
     #[pg_test]
     fn prune_jobs_removes_only_terminal() {
         Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::run("DELETE FROM ask._jobs").unwrap();
         // One done+aged, one pending.
         let done: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('a', 'sql')")
             .unwrap()
@@ -1070,14 +1093,23 @@ mod tests {
         let _pending: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('b', 'sql')")
             .unwrap()
             .unwrap();
-        Spi::run("SELECT id FROM ask._job_claim()").unwrap(); // claims 'done' (oldest)
-        Spi::get_one_with_args::<bool>("SELECT ask._job_complete($1, 'x', 0, 0)", &[done.into()])
+        // Claim THIS specific job (don't assume claim order): the
+        // worker_pid + (ts,id) tie-break make "claim returns 'a'" unreliable,
+        // so claim whatever comes out and complete that exact id, then age it.
+        let claimed: pgrx::Uuid = Spi::get_one("SELECT id FROM ask._job_claim()")
+            .unwrap()
             .unwrap();
-        Spi::run_with_args(
-            "UPDATE ask._jobs SET finished_at = now() - interval '10 days' WHERE id = $1",
-            &[done.into()],
+        Spi::get_one_with_args::<bool>(
+            "SELECT ask._job_complete($1, 'x', 0, 0)",
+            &[claimed.into()],
         )
         .unwrap();
+        Spi::run_with_args(
+            "UPDATE ask._jobs SET finished_at = now() - interval '10 days' WHERE id = $1",
+            &[claimed.into()],
+        )
+        .unwrap();
+        let _ = done;
         let removed: Option<i64> = Spi::get_one("SELECT ask.prune_jobs('7 days')").unwrap();
         assert_eq!(removed, Some(1), "only the terminal+aged job is pruned");
         let remaining: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._jobs").unwrap();
