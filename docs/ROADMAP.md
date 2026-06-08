@@ -361,13 +361,16 @@ Full diff: [`CHANGELOG.md`](../CHANGELOG.md). Highlights:
 
 ## v0.6 — Background worker, async jobs, distribution
 
-No public surface yet committed. Candidate work, ordered by
-likelihood of landing in this release:
+Candidate work, ordered by likelihood of landing in this release:
 
-- [ ] Background worker drives `ask._jobs`: `ask.ask_async(question)`
-      returns a job id immediately; the worker runs the agent loop
-      under its own role and writes the result back. v0.5 ships only
-      the heartbeat skeleton.
+- [x] **Background worker drives `ask._jobs`** (ADR-0018, shipped in
+      0.5.9): `ask.ask_async(question)` enqueues a job and returns its
+      id immediately; the worker claims pending jobs with `FOR UPDATE
+      SKIP LOCKED`, runs the agent loop, and writes the result back to
+      `ask._jobs.answer`. Transient failures retry up to
+      `pg_ask.jobs_max_attempts`; orphaned `running` jobs (dead worker)
+      are reclaimed to `pending` past the orphan timeout. Opt-in via
+      `shared_preload_libraries='pg_ask'` + `pg_ask.jobs_enabled`.
 - [ ] `ask.recall_where(query, filter jsonb)` — jsonb metadata
       filter on the hybrid-search predicate.
 - [ ] Server-side streaming directly to the client mid-iteration

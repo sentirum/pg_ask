@@ -225,16 +225,55 @@ cargo pgrx install --release --features pg18    # writes into $PGHOME/lib
 psql -c 'CREATE EXTENSION pg_ask;'
 ```
 
-### Upgrade to 0.5.6
+### Upgrade to 0.5.9
+
+```sql
+ALTER EXTENSION pg_ask UPDATE TO '0.5.9';
+```
+
+Adds the async job queue (`ask._jobs` + `ask.ask_async()`, ADR-0018): a
+background worker drains pending jobs with `FOR UPDATE SKIP LOCKED`,
+retries transient failures up to `pg_ask.jobs_max_attempts`, and reclaims
+orphaned jobs whose worker died. Opt-in (see
+[Async jobs](#async-jobs-v059)). The upgrade chain `0.5.7 → 0.5.8 → 0.5.9`
+is applied automatically; `ALTER EXTENSION … UPDATE` without a target
+goes straight to the control file's `default_version`.
+
+#### Earlier: 0.5.8
+
+```sql
+ALTER EXTENSION pg_ask UPDATE TO '0.5.8';
+```
+
+Production-hardens the event outbox (`ask._outbox` + `ask.emit()`) for
+reverse notifications (ADR-0017): `ask._outbox_emit` becomes the single
+SECURITY DEFINER authority, flood control runs under a transaction-scoped
+advisory lock, and validation moves into SQL so the fresh-install and
+upgrade paths can't drift. Opt-in via `pg_ask.events_enabled`.
+
+#### Earlier: 0.5.7
+
+```sql
+ALTER EXTENSION pg_ask UPDATE TO '0.5.7';
+```
+
+**Security release.** Closes several ways a low-privilege role could read
+secrets or reach blocked resources. Most importantly, `ask._config_get()`
+no longer leaks `api_key` / `embedding_api_key` to non-superusers — the
+upgrade script redefines it so the fix reaches **existing** databases, not
+just fresh installs. Also hardens `sql_guard` against quoted-identifier
+bypass and the SSRF guard against IPv4-compatible IPv6. Upgrading is
+strongly recommended. See [`CHANGELOG.md`](CHANGELOG.md).
+
+#### Earlier: 0.5.6
 
 ```sql
 ALTER EXTENSION pg_ask UPDATE TO '0.5.6';
 ```
 
-Adds the event outbox (`ask._outbox` + `ask.emit()`) for reverse
-notifications (ADR-0017). Opt-in via `pg_ask.events_enabled`. The upgrade
-script creates the table + writer helpers; the `ask.emit` function ships in
-the library. See [`CHANGELOG.md`](CHANGELOG.md).
+Adds the first cut of the event outbox (`ask._outbox` + `ask.emit()`) for
+reverse notifications (ADR-0017). Opt-in via `pg_ask.events_enabled`. See
+[`CHANGELOG.md`](CHANGELOG.md).
 
 #### Earlier: 0.5.5
 
@@ -330,6 +369,45 @@ anaphora ("of those", "it", "that category") resolves naturally.
 `ask._sessions.owner` defaults to `current_user`; existence and
 unauthorised access collapse to the same error, so id-space probing
 leaks no information.
+
+### Async jobs (v0.5.9)
+
+`ask.ask()` runs the agent loop inline, so the calling session blocks
+until the answer is ready. For long-running questions — or to fire a
+question and collect the answer later — `ask.ask_async()` enqueues the
+work onto `ask._jobs` and a background worker runs it out of band
+(ADR-0018).
+
+It is **opt-in** and needs two things: the background worker must be
+loaded via `shared_preload_libraries` (a one-time restart), and the queue
+must be enabled. An install that doesn't use async pays nothing.
+
+```bash
+# 1. Load the worker (preserve any existing preload list) and restart once.
+psql -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_ask';"
+psql -c "ALTER SYSTEM SET pg_ask.jobs_enabled = on;"
+sudo systemctl restart postgresql   # or: pg_ctlcluster <ver> main restart
+```
+
+On startup you should see `pg_ask launcher started` in the server log.
+Then enqueue and poll:
+
+```sql
+-- Returns a job UUID immediately (NULL if the queue is disabled).
+SELECT ask.ask_async('weekly revenue per category, as a short report') AS job \gset
+
+-- Poll until the worker finishes (status: pending → running → done | failed).
+SELECT status, attempts, answer, error
+FROM   ask._jobs
+WHERE  id = :'job';
+```
+
+The worker claims jobs atomically with `FOR UPDATE SKIP LOCKED`, retries
+transient failures up to `pg_ask.jobs_max_attempts` (default 3), and a
+job whose worker dies mid-run is reclaimed from `running` back to
+`pending` once `started_at` exceeds the orphan timeout. `ask._jobs.owner`
+defaults to `current_user` and the table is row-level-security scoped, so
+callers see only their own jobs.
 
 ### Long-term memory (v0.3, optional)
 
