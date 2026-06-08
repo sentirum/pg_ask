@@ -172,20 +172,22 @@ $$;
 -- it). _outbox_prune is destructive → operator-only.
 REVOKE ALL ON FUNCTION ask._outbox_prune(interval, int) FROM PUBLIC;
 
--- ask.prune_events(text, int) is a #[pg_extern]; pgrx emits its definition in
--- the generated portion of this upgrade. It is destructive (deletes outbox
--- rows), so we lock it to operators here — the finalize step only runs on
--- fresh installs, not on ALTER EXTENSION UPDATE. Wrapped so the upgrade does
--- not fail on installs where the generated function is created in a later
--- step / not yet visible.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM pg_proc p
-        JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname = 'ask' AND p.proname = 'prune_events'
-    ) THEN
-        EXECUTE 'REVOKE ALL ON FUNCTION ask.prune_events(text, int) FROM PUBLIC';
-    END IF;
-END
-$$;
+-- ask.prune_events(text, int) is a NEW #[pg_extern] in 0.5.8. Unlike the SQL
+-- helpers above (which we CREATE OR REPLACE by hand), pgrx does NOT emit
+-- CREATE FUNCTION DDL for #[pg_extern]s into an ALTER EXTENSION UPDATE script
+-- — that DDL only lands in the base-install pg_ask--<version>.sql. So a new
+-- C-language entry point must be created here explicitly, or it is simply
+-- missing after an upgrade. This mirrors the pgrx-generated definition in
+-- pg_ask--0.5.8.sql (LANGUAGE c, MODULE_PATHNAME, prune_events_wrapper).
+CREATE OR REPLACE FUNCTION ask."prune_events"(
+    "older_than" text,
+    "batch_size" int DEFAULT 10000
+) RETURNS bigint
+STRICT VOLATILE PARALLEL UNSAFE
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'prune_events_wrapper';
+
+-- Destructive (deletes outbox rows), so lock it to operators rather than
+-- leaving pgrx's default EXECUTE TO PUBLIC. The finalize step that does this
+-- on fresh installs does not run on ALTER EXTENSION UPDATE, so we repeat it.
+REVOKE ALL ON FUNCTION ask.prune_events(text, int) FROM PUBLIC;

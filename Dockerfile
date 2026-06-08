@@ -90,11 +90,12 @@ RUN mkdir -p /staging/lib /staging/extension \
     && cp /usr/share/postgresql/${PG_MAJOR}/extension/pg_ask.control \
           /usr/share/postgresql/${PG_MAJOR}/extension/pg_ask*.sql \
           /staging/extension/ \
-    && (cp sql/pg_ask--0.5.5--0.5.6.sql /staging/extension/ 2>/dev/null || true) \
-    && (cp sql/pg_ask--0.5.4--0.5.5.sql /staging/extension/ 2>/dev/null || true) \
-    && (cp sql/pg_ask--0.5.3--0.5.4.sql /staging/extension/ 2>/dev/null || true) \
-    && (cp sql/pg_ask--0.5.2--0.5.3.sql /staging/extension/ 2>/dev/null || true) \
-    && (cp sql/pg_ask--0.5.1--0.5.2.sql /staging/extension/ 2>/dev/null || true)
+    && cp sql/pg_ask--*--*.sql /staging/extension/ 2>/dev/null || true
+# Note: the cp above bundles EVERY hand-written upgrade script via glob
+# (not a hardcoded list) so any older install can step through with
+# ALTER EXTENSION UPDATE. The previous explicit list silently omitted new
+# paths (e.g. 0.5.6->0.5.7, 0.5.7->0.5.8); globbing keeps this correct as
+# new migrations land, matching the deb/apk/rpm packaging scripts.
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 2: runtime
