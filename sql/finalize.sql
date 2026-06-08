@@ -42,3 +42,28 @@ REVOKE ALL ON FUNCTION ask.prune_events(text, int) FROM PUBLIC;
 --   GRANT EXECUTE ON FUNCTION ask.prune_jobs(text, int) TO maintenance_role;
 -- ---------------------------------------------------------------------------
 REVOKE ALL ON FUNCTION ask.prune_jobs(text, int) FROM PUBLIC;
+
+-- ---------------------------------------------------------------------------
+-- ask.run_pending_jobs() drains the async queue synchronously: it claims and
+-- runs jobs regardless of who enqueued them (it calls the operator-only
+-- worker-path helpers). That cross-owner reach makes it an operator action,
+-- not something to expose to every role — so it is locked down alongside the
+-- worker-path helpers it depends on. Grant it to your pg_cron / maintenance
+-- role explicitly:
+--   GRANT EXECUTE ON FUNCTION ask.run_pending_jobs() TO maintenance_role;
+-- The background worker (connects as superuser) does not need this grant.
+--
+-- IMPORTANT (H2): run_pending_jobs() is SECURITY INVOKER and internally calls
+-- the operator-only worker-path helpers (_job_claim / _job_complete /
+-- _job_fail / _job_recover_orphans / _job_release). A NON-superuser
+-- maintenance role therefore needs EXECUTE on those too, or it will get
+-- "permission denied" mid-drain. Grant the full set:
+--   GRANT EXECUTE ON FUNCTION ask._job_claim(),
+--                             ask._job_complete(uuid, text, bigint, bigint),
+--                             ask._job_fail(uuid, text, int),
+--                             ask._job_recover_orphans(int),
+--                             ask._job_release(uuid)
+--     TO maintenance_role;
+-- A superuser cron role needs none of these grants.
+-- ---------------------------------------------------------------------------
+REVOKE ALL ON FUNCTION ask.run_pending_jobs() FROM PUBLIC;

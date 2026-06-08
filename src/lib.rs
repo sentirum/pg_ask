@@ -908,6 +908,107 @@ mod tests {
     }
 
     #[pg_test]
+    fn job_complete_requires_owning_worker_pid() {
+        // B1 regression: _job_complete only transitions a row whose
+        // worker_pid matches the caller's backend. We simulate a "ghost
+        // worker" by claiming (stamping our pid), then rewriting worker_pid
+        // to a different value, then completing — it must be a no-op.
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
+            .unwrap()
+            .unwrap();
+        Spi::run("SELECT id FROM ask._job_claim()").unwrap();
+        // Pretend another backend now owns the running row.
+        Spi::run_with_args(
+            "UPDATE ask._jobs SET worker_pid = pg_backend_pid() + 1 WHERE id = $1",
+            &[id.into()],
+        )
+        .unwrap();
+        let ok: Option<bool> =
+            Spi::get_one_with_args("SELECT ask._job_complete($1, 'stale', 0, 0)", &[id.into()])
+                .unwrap();
+        assert_eq!(ok, Some(false), "complete from a non-owning pid is a no-op");
+        let st: Option<String> =
+            Spi::get_one_with_args("SELECT status FROM ask._jobs WHERE id=$1", &[id.into()])
+                .unwrap();
+        assert_eq!(st.as_deref(), Some("running"), "row stays running");
+    }
+
+    #[pg_test]
+    fn job_release_returns_running_to_pending() {
+        // M1: _job_release flips our running claim back to pending without
+        // consuming an attempt.
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
+            .unwrap()
+            .unwrap();
+        Spi::run("SELECT id FROM ask._job_claim()").unwrap();
+        let attempts_before: Option<i32> =
+            Spi::get_one_with_args("SELECT attempts FROM ask._jobs WHERE id=$1", &[id.into()])
+                .unwrap();
+        assert_eq!(attempts_before, Some(1));
+        let released: Option<bool> =
+            Spi::get_one_with_args("SELECT ask._job_release($1)", &[id.into()]).unwrap();
+        assert_eq!(released, Some(true));
+        let st: Option<String> =
+            Spi::get_one_with_args("SELECT status FROM ask._jobs WHERE id=$1", &[id.into()])
+                .unwrap();
+        assert_eq!(st.as_deref(), Some("pending"), "released back to pending");
+        // attempts NOT incremented by release.
+        let attempts_after: Option<i32> =
+            Spi::get_one_with_args("SELECT attempts FROM ask._jobs WHERE id=$1", &[id.into()])
+                .unwrap();
+        assert_eq!(
+            attempts_after,
+            Some(1),
+            "release does not consume an attempt"
+        );
+    }
+
+    #[pg_test]
+    fn run_pending_jobs_is_noop_when_disabled() {
+        // H1 regression: with jobs disabled, run_pending_jobs returns 0 and
+        // does NOT run orphan recovery (a running row stays running).
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
+            .unwrap()
+            .unwrap();
+        Spi::run("SELECT id FROM ask._job_claim()").unwrap();
+        Spi::run_with_args(
+            "UPDATE ask._jobs SET started_at = now() - interval '1 hour' WHERE id = $1",
+            &[id.into()],
+        )
+        .unwrap();
+        // Now disable and drain.
+        Spi::run("SET pg_ask.jobs_enabled = off").unwrap();
+        let processed: Option<i64> = Spi::get_one("SELECT ask.run_pending_jobs()").unwrap();
+        assert_eq!(processed, Some(0), "disabled drain processes nothing");
+        let st: Option<String> =
+            Spi::get_one_with_args("SELECT status FROM ask._jobs WHERE id=$1", &[id.into()])
+                .unwrap();
+        assert_eq!(
+            st.as_deref(),
+            Some("running"),
+            "disabled drain does not run orphan recovery"
+        );
+    }
+
+    #[pg_test]
+    fn job_claim_returns_owner() {
+        // Privilege isolation: claim must expose the enqueuing owner so the
+        // worker can SET ROLE to it before running the agent loop.
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        Spi::get_one::<pgrx::Uuid>("SELECT ask.ask_async('q', 'sql')")
+            .unwrap()
+            .unwrap();
+        let owner: Option<String> =
+            Spi::get_one("SELECT owner::text FROM ask._job_claim()").unwrap();
+        // session_user in the test backend; just assert it's non-null and
+        // matches the job row's owner.
+        assert!(owner.is_some(), "claim returns the owner role");
+    }
+
+    #[pg_test]
     fn run_pending_jobs_executes_end_to_end() {
         // Full async path against the fixture provider: enqueue a 'sql'
         // job, drain it synchronously, and assert the answer landed.

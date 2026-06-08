@@ -73,10 +73,15 @@ pub static JOBS_MAX_ATTEMPTS: GucSetting<i32> = GucSetting::<i32>::new(3);
 
 /// A `running` job whose `started_at` is older than this is considered
 /// orphaned (its worker died) and returned to `pending` by
-/// `ask._job_recover_orphans`. Should comfortably exceed the worst-case
-/// agent-loop runtime so a slow-but-alive job isn't reclaimed under it.
-/// Default 300000 (5 min). Plain integer ms (read via current_setting::int).
-pub static JOBS_ORPHAN_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(300_000);
+/// `ask._job_recover_orphans`. Must comfortably exceed the worst-case
+/// agent-loop runtime so a slow-but-alive job isn't reclaimed under it: with
+/// the defaults a single job can run up to roughly
+/// `max_iterations * http_total_timeout_ms` (24 * 120s ≈ 48 min), so the
+/// default here is 1 hour. The `worker_pid` guard in `_job_complete` /
+/// `_job_fail` prevents a falsely-reclaimed job from being clobbered even if
+/// this is set too low, but a too-low value still wastes an attempt on a
+/// live job — keep it above your real worst case. Plain integer ms.
+pub static JOBS_ORPHAN_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(3_600_000);
 
 /// Maximum jobs a single `ask.run_pending_jobs()` / worker drain pass
 /// processes before returning, so one pass can't monopolise a worker. The

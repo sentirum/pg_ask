@@ -49,11 +49,77 @@ in the caller. The synchronous `ask.ask()` path is unchanged.
   `jobs_orphan_timeout_ms` (300000), `jobs_batch` (10),
   `jobs_poll_interval_ms` (5000).
 
+### Hardening (post-review)
+
+- **Real per-job durability**: the worker now commits the `claim` (running)
+  transition in its OWN transaction before the agent loop, then commits
+  `complete`/`fail` in another. A crash mid-loop leaves a committed `running`
+  row that orphan recovery reclaims — previously claim+execute+complete shared
+  one transaction, so `running` was never visible and orphan recovery was
+  effectively dead code.
+- **Worker respawn**: the launcher keeps each worker's handle and checks
+  liveness (`pid()`) every reconcile, respawning a worker that died. The
+  previous grow-only "spawned" set meant a single worker crash stalled that
+  database's queue until a full instance restart.
+- **Poison-pill fairness**: the synchronous `run_pending_jobs` drain tracks
+  ids attempted in the pass, so a permanently-failing job that re-queues
+  itself can't monopolise the batch and starve other pending jobs.
+- **Privilege tiers**: the worker-path helpers (`_job_claim`, `_job_complete`,
+  `_job_fail`, `_job_recover_orphans`) and `ask.run_pending_jobs()` are now
+  operator-only (revoked from PUBLIC) since they act on jobs regardless of
+  owner; only the owner-scoped `ask.ask_async` / `ask.job_*` / `ask.cancel_job`
+  stay public. The background worker connects as superuser and is unaffected.
+
+### Hardening (six-model review pass)
+
+Findings from six parallel reviewer models, each empirically verified:
+
+- **Privilege isolation**: the worker now runs each job's agent loop under
+  the role that ENQUEUED it (`SET LOCAL ROLE` via `set_config`), so async
+  SQL/tool execution has exactly the caller's privileges — not the worker's
+  superuser rights. `_job_claim` returns the owner; the role is reset before
+  the trusted state-machine writes.
+- **Double-execution race closed**: `_job_complete` / `_job_fail` /
+  `_job_release` now require `worker_pid = pg_backend_pid()`, so a
+  slow-but-alive worker whose job was orphan-recovered and re-claimed by
+  another worker can no longer clobber the new attempt with a stale result.
+- **dblink conninfo bug**: the launcher's DB-discovery probe used
+  `quote_ident` (produces `dbname="MyDb"`, which libpq reads as a DB named
+  `"MyDb"` with the quotes and fails) — switched to `quote_literal`
+  (`dbname='MyDb'`). Without this, databases with uppercase/special names
+  were silently never given a worker.
+- **Launcher restart leak**: on restart the launcher's old dynamic workers
+  keep running; it now checks `pg_stat_activity` for an existing
+  `pg_ask worker: {db}` before spawning (no duplicate per restart) and
+  terminates its workers on clean shutdown.
+- **`run_pending_jobs` honours `jobs_enabled`**: returns 0 immediately and
+  skips orphan recovery when the queue is disabled (matching the worker and
+  its own docstring).
+- **Orphan timeout default raised 5 min → 1 hour** so a slow-but-legitimate
+  job (up to `max_iterations * http_total_timeout_ms`) isn't falsely
+  reclaimed.
+- **Indexes**: `_jobs_pending_idx` / `_jobs_running_idx` now lead with `db`
+  (multi-database claim/recovery scans), and a new partial
+  `_jobs_terminal_idx (finished_at) WHERE status IN (done,failed,cancelled)`
+  serves `prune_jobs`.
+- **RLS on `ask._jobs`**: a direct `SELECT` is scoped to the caller's own
+  rows (`_jobs_owner_select`), matching `_traces`; the bgworker (superuser)
+  bypasses it.
+- **Poison-pill drain**: a re-claimed retry is now `_job_release`d back to
+  `pending` instead of being left stuck in `running` until orphan recovery.
+- **FIFO tie-break**: `_job_claim` orders by `(ts, id)` for deterministic
+  ordering of same-timestamp jobs.
+
 ### Notes
 
 - A background worker cannot `LISTEN` (PostgreSQL restricts it to regular
   client backends), so workers are poll-driven; the enqueue path still fires
   `pg_notify('pg_ask_jobs', id)` for any external listener.
+- SIGTERM is checked between jobs, so shutdown takes effect within at most
+  one job's runtime; a shutdown arriving mid-agent-loop still waits for that
+  job's LLM call to return or hit `http_total_timeout_ms` (a bgworker's
+  SIGTERM doesn't trip the agent loop's interrupt check). Keep
+  `http_total_timeout_ms` modest for a tight shutdown bound.
 - Enable the worker by adding `pg_ask` to `shared_preload_libraries` and
   setting `pg_ask.jobs_enabled = on`. Without the preload, async still works
   via `ask.run_pending_jobs()`.
