@@ -63,7 +63,10 @@ fn do_unregister(name: &str) -> Result<bool, AskError> {
 }
 
 /// List user-defined tools for the current role.
-#[pg_extern(schema = "ask", stable, parallel_safe)]
+///
+/// `parallel_unsafe`: reads `ask._tools` via SPI (`Spi::connect`), which is
+/// forbidden inside a parallel worker.
+#[pg_extern(schema = "ask", stable, parallel_unsafe)]
 fn list_tools() -> TableIterator<'static, (name!(name, String), name!(spec, pgrx::Json))> {
     let rows = match do_list() {
         Ok(r) => r,

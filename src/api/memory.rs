@@ -79,7 +79,10 @@ fn forget(id: Uuid) -> bool {
 
 /// Browse memories the caller owns. Optional `namespace` filter; defaults
 /// to NULL (all namespaces). Newest-first, `limit_n` capped at 200.
-#[pg_extern(schema = "ask", stable, parallel_safe)]
+///
+/// `parallel_unsafe`: reads `ask._memories` via SPI, forbidden in a parallel
+/// worker.
+#[pg_extern(schema = "ask", stable, parallel_unsafe)]
 fn list_memories(
     namespace: default!(Option<&str>, "NULL"),
     limit_n: default!(i32, "50"),
@@ -115,7 +118,10 @@ fn list_memories(
 
 /// Enumerate namespaces the caller has populated, with row counts.
 /// Ordered by row count desc — a good "what is in here?" probe.
-#[pg_extern(schema = "ask", stable, parallel_safe)]
+///
+/// `parallel_unsafe`: reads `ask._memories` via SPI, forbidden in a parallel
+/// worker.
+#[pg_extern(schema = "ask", stable, parallel_unsafe)]
 fn list_namespaces() -> TableIterator<'static, (name!(namespace, String), name!(n, i64))> {
     let rows = match memory::namespaces() {
         Ok(r) => r,
