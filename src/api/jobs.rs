@@ -37,7 +37,12 @@ fn ask_async(question: &str, kind: default!(&str, "'ask'")) -> Option<Uuid> {
 /// `failed` / `cancelled`, or NULL if no such job belongs to you (the
 /// NotFound == Unauthorized collapse the rest of pg_ask uses, so id-space
 /// probing leaks nothing).
-#[pg_extern(schema = "ask", stable, parallel_safe)]
+// parallel_unsafe: this reads via SPI (Spi::get_one_with_args). A function
+// the planner believes is parallel-safe may be invoked inside a parallel
+// worker, where SPI is forbidden ("cannot start commands during a parallel
+// operation"). STABLE keeps it inlinable in the leader; UNSAFE just bars the
+// worker path.
+#[pg_extern(schema = "ask", stable, parallel_unsafe)]
 fn job_status(job_id: Uuid) -> Option<String> {
     // Scalar subquery so the outer SELECT always returns exactly one row
     // (the value or NULL). A bare `SELECT ... WHERE` returns zero rows when
@@ -56,7 +61,8 @@ fn job_status(job_id: Uuid) -> Option<String> {
 /// The answer text of a completed job you own. NULL while the job is still
 /// pending/running, if it failed (use `ask.job_error`), or if no such job
 /// belongs to you.
-#[pg_extern(schema = "ask", stable, parallel_safe)]
+// parallel_unsafe: reads via SPI (see job_status).
+#[pg_extern(schema = "ask", stable, parallel_unsafe)]
 fn job_result(job_id: Uuid) -> Option<String> {
     match Spi::get_one_with_args::<String>(
         "SELECT (SELECT answer FROM ask._jobs \
@@ -71,7 +77,8 @@ fn job_result(job_id: Uuid) -> Option<String> {
 /// The error text of a failed job you own, or NULL if it didn't fail / isn't
 /// yours. Separate from `job_result` so a caller can tell "no answer yet"
 /// from "answer is empty".
-#[pg_extern(schema = "ask", stable, parallel_safe)]
+// parallel_unsafe: reads via SPI (see job_status).
+#[pg_extern(schema = "ask", stable, parallel_unsafe)]
 fn job_error(job_id: Uuid) -> Option<String> {
     match Spi::get_one_with_args::<String>(
         "SELECT (SELECT error FROM ask._jobs \
