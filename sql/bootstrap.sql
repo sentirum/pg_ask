@@ -379,16 +379,43 @@ CREATE TABLE IF NOT EXISTS ask._jobs (
     -- Which backend PID claimed the job (diagnostics / orphan detection).
     worker_pid   int
 );
--- Worker hot path: "oldest pending job, FIFO". Partial index stays tiny
--- even as done/failed history accumulates.
+-- Worker hot path: "oldest pending job in THIS database, FIFO". The claim
+-- and orphan-recovery scans both also filter on db = current_database(), so
+-- the partial indexes lead with `db` to give an exact index scan in
+-- multi-database clusters (M3) instead of skipping over other DBs' rows.
+-- Partial predicate keeps them tiny even as done/failed history grows.
 CREATE INDEX IF NOT EXISTS _jobs_pending_idx
-    ON ask._jobs (ts) WHERE status = 'pending';
--- Orphan recovery + per-DB worker scoping scan running rows by started_at.
+    ON ask._jobs (db, ts) WHERE status = 'pending';
+-- Orphan recovery scans running rows by (db, started_at).
 CREATE INDEX IF NOT EXISTS _jobs_running_idx
-    ON ask._jobs (started_at) WHERE status = 'running';
+    ON ask._jobs (db, started_at) WHERE status = 'running';
 -- Owner-scoped result lookups (ask.job_status / ask.job_result).
 CREATE INDEX IF NOT EXISTS _jobs_owner_idx
     ON ask._jobs (owner, ts);
+-- Retention hot path (H4): ask._jobs_prune deletes terminal rows by
+-- finished_at. A partial index on the terminal rows serves the prune scan
+-- directly and stays small (mirrors _outbox_processed_idx).
+CREATE INDEX IF NOT EXISTS _jobs_terminal_idx
+    ON ask._jobs (finished_at) WHERE status IN ('done','failed','cancelled');
+
+-- Row-level security (M2): defence-in-depth so a direct SELECT on ask._jobs
+-- only ever returns the caller's own jobs, matching the owner scoping the
+-- job_status/job_result/job_error functions already enforce. Mirrors the
+-- _traces RLS policy. The table owner (extension superuser) and the
+-- background worker (connects as superuser) bypass RLS, so the worker drain
+-- path is unaffected; only ordinary roles doing a direct SELECT are scoped.
+ALTER TABLE ask._jobs ENABLE ROW LEVEL SECURITY;
+DO $jobs_rls$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policy WHERE polname = '_jobs_owner_select'
+          AND polrelid = 'ask._jobs'::regclass
+    ) THEN
+        CREATE POLICY _jobs_owner_select ON ask._jobs
+            FOR SELECT USING (owner = session_user);
+    END IF;
+END
+$jobs_rls$;
 
 -- ---------------------------------------------------------------------------
 -- SECURITY DEFINER helpers for internal-table writes.
@@ -779,7 +806,7 @@ $$;
 -- queue is empty). Scoped to current_database() so a worker only ever runs
 -- jobs from the DB it is connected to (a bgworker binds to one DB).
 CREATE OR REPLACE FUNCTION ask._job_claim()
-RETURNS TABLE (id uuid, kind text, question text, attempts int)
+RETURNS TABLE (id uuid, kind text, question text, attempts int, owner name)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -790,7 +817,7 @@ BEGIN
         SELECT j.id FROM ask._jobs j
          WHERE j.status = 'pending'
            AND j.db = current_database()
-         ORDER BY j.ts
+         ORDER BY j.ts, j.id
          FOR UPDATE SKIP LOCKED
          LIMIT 1
     )
@@ -802,7 +829,7 @@ BEGIN
            attempts   = j.attempts + 1
       FROM next
      WHERE j.id = next.id
-    RETURNING j.id, j.kind, j.question, j.attempts;
+    RETURNING j.id, j.kind, j.question, j.attempts, j.owner;
 END
 $$;
 
@@ -822,6 +849,11 @@ AS $$
 DECLARE
     n int;
 BEGIN
+    -- The worker_pid guard (B1) makes completion claim-scoped: only the
+    -- backend that currently owns the running row can finish it. Without it,
+    -- a slow-but-alive worker A whose job was orphan-recovered and re-claimed
+    -- by worker B could complete B's fresh attempt with A's stale answer
+    -- (double-execution / wrong result).
     UPDATE ask._jobs
        SET status = 'done',
            answer = p_answer,
@@ -829,7 +861,7 @@ BEGIN
            prompt_tokens = p_prompt,
            completion_tokens = p_completion,
            finished_at = now()
-     WHERE id = job_id AND status = 'running';
+     WHERE id = job_id AND status = 'running' AND worker_pid = pg_backend_pid();
     GET DIAGNOSTICS n = ROW_COUNT;
     IF n > 0 THEN
         PERFORM pg_notify('pg_ask_jobs_done', job_id::text);
@@ -857,11 +889,14 @@ DECLARE
     cur_attempts int;
     new_status   text;
 BEGIN
+    -- worker_pid guard (B1): only the backend that owns the running claim may
+    -- fail it, so a re-claimed job isn't failed/retried by a ghost worker.
     SELECT attempts INTO cur_attempts
-      FROM ask._jobs WHERE id = job_id AND status = 'running'
+      FROM ask._jobs
+     WHERE id = job_id AND status = 'running' AND worker_pid = pg_backend_pid()
       FOR UPDATE;
     IF cur_attempts IS NULL THEN
-        RETURN NULL;  -- not running (already done/cancelled); no-op
+        RETURN NULL;  -- not ours / not running (done/cancelled/re-claimed); no-op
     END IF;
     IF cur_attempts >= max_attempts THEN
         new_status := 'failed';
@@ -932,6 +967,29 @@ BEGIN
 END
 $$;
 
+-- Release a running job back to 'pending' WITHOUT touching attempts — used by
+-- the synchronous drain (M1) when it re-claims a job it already ran this
+-- pass (a retry it just re-queued). Returns it to pending so the row doesn't
+-- sit in 'running' until orphan recovery. PID-scoped like the completion
+-- helpers so it only releases our own claim.
+CREATE OR REPLACE FUNCTION ask._job_release(
+    job_id uuid
+) RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    n int;
+BEGIN
+    UPDATE ask._jobs
+       SET status = 'pending', started_at = NULL, worker_pid = NULL
+     WHERE id = job_id AND status = 'running' AND worker_pid = pg_backend_pid();
+    GET DIAGNOSTICS n = ROW_COUNT;
+    RETURN n > 0;
+END
+$$;
+
 -- Delete terminal (done/failed/cancelled) jobs older than `older_than`,
 -- in batches — same retention pattern as ask._outbox_prune. Pending/running
 -- jobs are never touched. Operator-only.
@@ -975,6 +1033,7 @@ BEGIN
     RETURN total;
 END
 $$;
+
 
 -- Insert a memory row owned by the calling role. The Rust caller passes
 -- the embedding as a text-encoded vector literal so we don't have to
@@ -1279,6 +1338,7 @@ REVOKE ALL ON FUNCTION ask._job_claim()                                         
 REVOKE ALL ON FUNCTION ask._job_complete(uuid, text, bigint, bigint)                      FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._job_fail(uuid, text, int)                                     FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._job_recover_orphans(int)                                      FROM PUBLIC;
+REVOKE ALL ON FUNCTION ask._job_release(uuid)                                             FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._job_cancel(uuid)                                              FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._jobs_prune(interval, int)                                     FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask._memory_insert(text, text, jsonb, text)                        FROM PUBLIC;
@@ -1312,18 +1372,20 @@ GRANT EXECUTE ON FUNCTION ask._session_append_message(uuid, text, text, text, te
 GRANT EXECUTE ON FUNCTION ask._session_touch(uuid)                                        TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._session_clear_messages(uuid)                               TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._config_get(text)                                           TO PUBLIC;
--- Async job helpers (owner-scoped bodies). _job_claim / _job_complete /
--- _job_fail / _job_recover_orphans are the worker's drain path; they are not
--- owner-filtered (a worker runs jobs regardless of who enqueued them), which
--- is why they live behind SECURITY DEFINER and are only reachable through the
--- vetted Rust entry points. In an untrusted multi-tenant DB an operator can
--- REVOKE these from PUBLIC and grant only to the worker/maintenance role;
--- see docs/SECURITY.md.
+-- Async job helpers. Two visibility tiers:
+--
+--   * User-facing, owner-scoped (safe for PUBLIC): _job_submit stamps
+--     session_user as owner; _job_cancel filters by owner = session_user.
+--     These back ask.ask_async / ask.cancel_job.
+--   * Worker-path, NOT owner-filtered (operator-only): _job_claim,
+--     _job_complete, _job_fail, _job_recover_orphans run jobs regardless of
+--     who enqueued them — a malicious role could otherwise claim/complete/
+--     fail another tenant's job by calling them directly. They are NOT
+--     granted to PUBLIC. The background worker connects as a superuser and
+--     is unaffected; ask.run_pending_jobs() (also operator-only) is the only
+--     other caller. An operator who wants a dedicated drain role grants
+--     EXECUTE on these four to it. See docs/SECURITY.md.
 GRANT EXECUTE ON FUNCTION ask._job_submit(text, text)                                     TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._job_claim()                                                TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._job_complete(uuid, text, bigint, bigint)                   TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._job_fail(uuid, text, int)                                  TO PUBLIC;
-GRANT EXECUTE ON FUNCTION ask._job_recover_orphans(int)                                   TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ask._job_cancel(uuid)                                           TO PUBLIC;
 
 -- Config-surface lockdown (C6) lives in a finalize SQL block in

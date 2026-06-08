@@ -29,7 +29,7 @@
 use crate::infra::config::{RuntimeConfig, JOBS_BATCH, JOBS_ENABLED, JOBS_POLL_INTERVAL_MS};
 use pgrx::bgworkers::*;
 use pgrx::prelude::*;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Maintenance DB the launcher connects to in order to enumerate databases.
@@ -68,15 +68,37 @@ pub extern "C-unwind" fn pg_ask_launcher_main(_arg: pg_sys::Datum) {
     BackgroundWorker::connect_worker_to_spi(Some(LAUNCHER_DB), None);
     log!("pg_ask launcher started");
 
-    // Databases we've already spawned a worker for this launcher lifetime.
-    // A dynamic worker with set_restart_time(None) that exits is gone for
-    // good, so if a DB's worker dies the next reconcile re-spawns it.
-    let mut spawned: HashSet<String> = HashSet::new();
+    // Per-database worker handles, kept so we can check liveness each
+    // reconcile and RESPAWN a worker that has died. A dynamic worker is
+    // created with set_restart_time(None) (the postmaster won't restart it),
+    // so respawning is the launcher's job: if `handle.pid()` no longer
+    // reports `Started`, the worker exited (crash, OOM, or extension drop)
+    // and we drop the handle so the spawn loop below recreates it.
+    //
+    // Restart safety (B3): when the postmaster restarts THIS launcher, the
+    // old launcher's dynamic workers keep running (Postgres does not
+    // parent-kill them) but this fresh process starts with an empty map. To
+    // avoid spawning a duplicate worker per database on every launcher
+    // restart, the spawn loop also checks `pg_stat_activity` for an existing
+    // 'pg_ask worker: {db}' backend and skips databases that already have a
+    // live worker. On a clean shutdown we additionally terminate our own
+    // workers so they don't outlive the launcher.
+    let mut workers: HashMap<String, DynamicBackgroundWorker> = HashMap::new();
 
     while BackgroundWorker::wait_latch(Some(Duration::from_millis(LAUNCHER_RECONCILE_MS))) {
         if BackgroundWorker::sighup_received() {
             // Nothing cached from GUCs here; reconcile picks up changes.
         }
+
+        // Drop handles for workers that are no longer running so they get
+        // respawned below. `pid()` returns Ok(Started) only while alive.
+        workers.retain(|db, handle| {
+            let alive = handle.pid().is_ok();
+            if !alive {
+                log!("pg_ask launcher: worker for '{db}' is gone; will respawn");
+            }
+            alive
+        });
 
         let dbs = match list_pgask_databases() {
             Ok(dbs) => dbs,
@@ -87,13 +109,23 @@ pub extern "C-unwind" fn pg_ask_launcher_main(_arg: pg_sys::Datum) {
         };
 
         for db in dbs {
-            if spawned.contains(&db) {
-                continue;
+            if workers.contains_key(&db) {
+                continue; // a live worker (ours) already owns this database
+            }
+            // B3: a worker from a previous launcher lifetime may still be
+            // running this database. Don't spawn a duplicate.
+            match db_worker_running(&db) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    log!("pg_ask launcher: worker-presence check for '{db}' failed: {e}");
+                    continue; // be conservative: skip this round, retry next
+                }
             }
             match spawn_db_worker(&db) {
-                Ok(()) => {
+                Ok(handle) => {
                     log!("pg_ask launcher: spawned worker for database '{db}'");
-                    spawned.insert(db);
+                    workers.insert(db, handle);
                 }
                 Err(()) => {
                     log!("pg_ask launcher: failed to spawn worker for '{db}' (will retry)");
@@ -102,57 +134,133 @@ pub extern "C-unwind" fn pg_ask_launcher_main(_arg: pg_sys::Datum) {
         }
     }
 
+    // Clean shutdown (SIGTERM): terminate our dynamic workers so they don't
+    // outlive the launcher and get duplicated by the next launcher instance.
+    for (db, handle) in workers.drain() {
+        log!("pg_ask launcher: terminating worker for '{db}'");
+        let _ = handle.terminate();
+    }
     log!("pg_ask launcher shutting down");
+}
+
+/// Is there already a live 'pg_ask worker: {db}' backend? Used to avoid
+/// spawning a duplicate when this launcher restarted while the previous
+/// launcher's dynamic workers are still running (B3). Matches the bgw name
+/// we set in `spawn_db_worker`.
+fn db_worker_running(db: &str) -> Result<bool, String> {
+    BackgroundWorker::transaction(|| {
+        let present: Option<bool> = Spi::get_one_with_args(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+             WHERE backend_type = $1)",
+            &[format!("pg_ask worker: {db}").into()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok::<_, String>(present.unwrap_or(false))
+    })
 }
 
 /// List databases that allow connections AND have the pg_ask extension
 /// installed. Run in the launcher's maintenance-DB connection.
 fn list_pgask_databases() -> Result<Vec<String>, String> {
     BackgroundWorker::transaction(|| {
+        // The launcher runs in the 'postgres' maintenance DB, where the
+        // pg_ask extension (and the `ask` schema) is NOT installed — so we
+        // CANNOT call any `ask.*` helper here. We discover pg_ask-enabled
+        // databases inline:
+        //
+        //   * pg_extension is per-database, so we use dblink (standard
+        //     contrib) to probe each connectable database's catalog and keep
+        //     only the ones with pg_ask. This stops the launcher from
+        //     endlessly respawning a short-lived worker in a database that
+        //     will never have the extension (e.g. 'postgres' itself).
+        //   * Each probe runs in its own subtransaction so an unreachable
+        //     database (permissions, conn cap) is skipped, not fatal.
+        //   * If dblink is not installed in this maintenance DB we cannot
+        //     probe; fall back to every connectable database and rely on the
+        //     per-DB worker's own extension_present() check (noisier:
+        //     respawn churn for non-pg_ask DBs, but correct).
+        //
+        // dblink must be installed in the launcher's database (CREATE
+        // EXTENSION dblink in 'postgres'); the Docker image's initdb hook
+        // does this automatically.
         Spi::connect(|client| {
-            // We cannot see other databases' pg_extension catalogs from here,
-            // so we approximate: every connectable, non-template database is a
-            // candidate, and the per-DB worker itself checks for the extension
-            // on connect (cheap, and the authoritative place). This keeps the
-            // launcher's query trivial and avoids dblink.
-            // datname is the `name` type (Oid 19); cast to text so it maps to
-            // Rust String cleanly.
+            let have_dblink = client
+                .select(
+                    "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'dblink')",
+                    Some(1),
+                    &[],
+                )?
+                .first()
+                .get::<bool>(1)?
+                == Some(true);
+
             let rows = client.select(
                 "SELECT datname::text FROM pg_database \
-                 WHERE datallowconn AND NOT datistemplate \
-                 ORDER BY datname",
+                 WHERE datallowconn AND NOT datistemplate ORDER BY datname",
                 None,
                 &[],
             )?;
-            let mut out = Vec::new();
+            let mut candidates = Vec::new();
             for row in rows {
                 if let Some(name) = row.get::<String>(1)? {
-                    out.push(name);
+                    candidates.push(name);
                 }
             }
-            Ok::<_, pgrx::spi::SpiError>(out)
+
+            // No dblink: return all candidates (worker self-check is backstop).
+            if !have_dblink {
+                return Ok::<_, pgrx::spi::SpiError>(candidates);
+            }
+
+            // dblink available: keep only databases that truly have pg_ask.
+            let mut installed = Vec::new();
+            for db in candidates {
+                // Each probe in its own subtransaction so a connect failure
+                // doesn't abort the whole scan.
+                let probed =
+                    crate::infra::subtxn::run_in_subtransaction(Some("pgask_probe"), || {
+                        // quote_LITERAL, not quote_ident: this is a libpq
+                        // conninfo value, not a SQL identifier. quote_ident
+                        // produces dbname="MyDb" which libpq reads as a DB
+                        // literally named '"MyDb"' (quotes included) and fails
+                        // — silently skipping every DB whose name has uppercase
+                        // or special chars. quote_literal yields dbname='MyDb',
+                        // the correct conninfo form.
+                        let ok: Option<bool> = Spi::get_one_with_args(
+                            "SELECT ok FROM dblink('dbname=' || quote_literal($1), \
+                             'SELECT EXISTS (SELECT 1 FROM pg_extension \
+                             WHERE extname = ''pg_ask'')') AS t(ok bool)",
+                            &[db.clone().into()],
+                        )?;
+                        Ok(ok.unwrap_or(false))
+                    })
+                    .unwrap_or(false);
+                if probed {
+                    installed.push(db);
+                }
+            }
+            Ok::<_, pgrx::spi::SpiError>(installed)
         })
     })
     .map_err(|e| e.to_string())
 }
 
 /// Spawn a dynamic per-database worker bound to `db`. The database name is
-/// passed via `set_extra` so the worker knows where to connect.
-fn spawn_db_worker(db: &str) -> Result<(), ()> {
-    let handle = BackgroundWorkerBuilder::new(&format!("pg_ask worker: {db}"))
+/// passed via `set_extra` so the worker knows where to connect. Returns the
+/// handle so the launcher can check liveness and respawn on the next
+/// reconcile if the worker dies.
+fn spawn_db_worker(db: &str) -> Result<DynamicBackgroundWorker, ()> {
+    BackgroundWorkerBuilder::new(&format!("pg_ask worker: {db}"))
         .set_function("pg_ask_db_worker_main")
         .set_library("pg_ask")
         .set_extra(db)
         .enable_spi_access()
-        // No auto-restart: if it exits (e.g. extension dropped) the launcher
-        // decides whether to re-spawn on the next reconcile.
+        // No auto-restart: the launcher owns respawn (it checks pid() each
+        // reconcile), which lets us also stop respawning a DB that has
+        // dropped the extension.
         .set_restart_time(None)
         .load_dynamic()
-        .map_err(|_| ())?;
-    // We don't wait for startup — the launcher stays responsive. The handle
-    // is dropped; the worker keeps running independently.
-    let _ = handle;
-    Ok(())
+        .map_err(|_| ())
 }
 
 /// Per-database worker entry point. Connects to the database named in
@@ -250,16 +358,29 @@ fn extension_present() -> Result<bool, String> {
     })
 }
 
-/// One drain pass. Each step gets its OWN transaction so a long LLM round-
-/// trip never holds a single transaction open across the whole batch:
+/// One drain pass. The three phases each get their OWN transaction so the
+/// durability guarantees are real (see the `src/jobs` module docs):
 ///
 ///   1. one txn: check the switch, recover orphans, snapshot config
-///   2. per job: one txn to claim + run + complete/fail
+///   2. per job, in SEPARATE transactions:
+///        a. claim   — commits `running` (durable + visible) before slow work
+///        b. execute — agent loop (no _jobs lock held), then complete/fail
 ///
-/// Committing after each job means a worker crash loses at most the one
-/// in-flight job (which orphan recovery then re-queues), and the `running`
-/// transition is durable before the slow agent loop begins. No-op (cheap)
-/// when jobs are disabled.
+/// Splitting claim (2a) from execute (2b) is what makes orphan recovery
+/// meaningful: a crash during the agent loop leaves a committed `running`
+/// row that `_job_recover_orphans` can return to `pending`. A combined
+/// claim+execute txn would roll the claim back on crash, so `running` would
+/// never be visible and recovery would be dead code.
+///
+/// SIGTERM responsiveness: the flag is checked between every job (before each
+/// claim), so a shutdown takes effect within at most ONE job's runtime. A
+/// shutdown that arrives mid-agent-loop still waits for that single job's
+/// LLM call to return or hit `pg_ask.http_total_timeout_ms` — a background
+/// worker's SIGTERM sets `ShutdownRequestPending`, which does NOT trip the
+/// `check_for_interrupts!()` path the agent loop uses, so we cannot abort the
+/// in-flight HTTP call cleanly. Operators who need a hard upper bound on
+/// shutdown latency should keep `http_total_timeout_ms` modest. No-op
+/// (cheap) when jobs are disabled.
 fn drain_once() -> Result<(), String> {
     // Step 1: cheap preamble in its own transaction.
     let cfg = BackgroundWorker::transaction(|| {
@@ -275,25 +396,28 @@ fn drain_once() -> Result<(), String> {
         return Ok(()); // jobs disabled
     };
 
-    // Step 2: claim+run+complete each job in its own transaction.
+    // Step 2: each job in its own claim txn + execute txn.
     let max = JOBS_BATCH.get().max(1);
     for _ in 0..max {
-        // SIGTERM mid-batch: stop promptly, leaving the rest pending.
+        // Stop promptly on shutdown, leaving the rest pending.
         if BackgroundWorker::sigterm_received() {
             break;
         }
-        let did_work = BackgroundWorker::transaction(|| {
-            match crate::jobs::claim_one().map_err(|e| e.to_string())? {
-                None => Ok::<bool, String>(false),
-                Some(job) => {
-                    crate::jobs::execute_claimed(&cfg, &job).map_err(|e| e.to_string())?;
-                    Ok(true)
-                }
-            }
-        })?;
-        if !did_work {
+
+        // 2a. Claim in its own transaction so `running` is COMMITTED before
+        //     the agent loop runs. Returns None when the queue is empty.
+        let claimed =
+            BackgroundWorker::transaction(|| crate::jobs::claim_one().map_err(|e| e.to_string()))?;
+        let Some(job) = claimed else {
             break; // queue drained
-        }
+        };
+
+        // 2b. Execute + complete/fail in a separate transaction. If the
+        //     worker crashes here, the committed `running` row from 2a is
+        //     reclaimed by orphan recovery on the next pass / restart.
+        BackgroundWorker::transaction(|| {
+            crate::jobs::execute_claimed(&cfg, &job).map_err(|e| e.to_string())
+        })?;
     }
     Ok(())
 }

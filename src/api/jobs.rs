@@ -4,7 +4,7 @@
 //! status/result are owner-scoped SELECTs; the drain entry point delegates
 //! to [`crate::jobs`] (the use-case layer). No business logic here.
 
-use crate::infra::config::{RuntimeConfig, JOBS_BATCH};
+use crate::infra::config::{RuntimeConfig, JOBS_BATCH, JOBS_ENABLED};
 use crate::infra::errors::raise_as_pg_error;
 use crate::jobs;
 use pgrx::prelude::*;
@@ -104,11 +104,21 @@ fn cancel_job(job_id: Uuid) -> bool {
 /// Also recovers orphaned `running` jobs (from a crashed worker) first, so a
 /// pg_cron-only deployment still gets crash recovery.
 ///
+/// Operator-only: this claims and runs jobs regardless of who enqueued them
+/// (it goes through the operator-only worker-path helpers), so it is REVOKEd
+/// from PUBLIC in finalize.sql. Grant it to your pg_cron / maintenance role.
+///
 /// ```sql
 /// SELECT cron.schedule('pg_ask-drain', '10 seconds', $$SELECT ask.run_pending_jobs()$$);
 /// ```
 #[pg_extern(schema = "ask", volatile, parallel_unsafe)]
 fn run_pending_jobs() -> i64 {
+    // Honour the master switch, mirroring the background worker (H1/H2): when
+    // the queue is disabled this returns 0 immediately and, crucially, does
+    // NOT run orphan recovery — so a paused queue is truly inert.
+    if !JOBS_ENABLED.get() {
+        return 0;
+    }
     let cfg = match RuntimeConfig::load() {
         Ok(c) => c,
         Err(e) => raise_as_pg_error(&e),

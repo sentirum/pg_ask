@@ -24,6 +24,19 @@ run_sql() {
 
 configured=0
 
+# Async job launcher support: the background-worker launcher runs in the
+# 'postgres' maintenance DB and uses dblink to discover which databases have
+# pg_ask installed (so it only spawns workers where there is work). Install
+# dblink there if available; harmless when the async queue is unused. Without
+# it the launcher falls back to probing every database via a short-lived
+# worker (noisier, but still correct).
+if psql --username "$POSTGRES_USER" --dbname postgres -tAc \
+     "SELECT 1 FROM pg_available_extensions WHERE name='dblink'" | grep -q 1; then
+    echo "[pg_ask] installing dblink in 'postgres' DB for the async job launcher"
+    psql --username "$POSTGRES_USER" --dbname postgres \
+         -c "CREATE EXTENSION IF NOT EXISTS dblink;" || true
+fi
+
 if [ -n "${PG_ASK_PROVIDER:-}" ]; then
     echo "[pg_ask] setting provider = $PG_ASK_PROVIDER"
     run_sql "SELECT ask.config('provider', '$PG_ASK_PROVIDER');"
