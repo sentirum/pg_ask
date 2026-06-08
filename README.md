@@ -353,6 +353,73 @@ For the full list (timeouts, allow-lists, embedding config, schema
 budget, sensitive-column redaction, …) see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) § Configuration model.
 
+### Function reference
+
+The full public API surface, grouped by area. All functions live in the
+`ask` schema.
+
+**Ask**
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `ask.ask(question text)` | `text` | Run the agent loop inline and return the answer. |
+| `ask.sql(question text)` | `text` | Like `ask`, but returns just the generated SQL. |
+| `ask.preview(question text, …)` | `text` | Dry-run: show the plan/SQL without executing writes. |
+| `ask.ask_stream(question text)` | `setof text` | Stream the answer row-by-row as it is produced. |
+
+**Async jobs** (v0.5.9, opt-in — see [Async jobs](#async-jobs-v059))
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `ask.ask_async(question text, kind text default 'ask')` | `uuid` | Enqueue a job; returns its id (NULL if the queue is disabled). |
+| `ask.job_status(job_id uuid)` | `text` | `pending` · `running` · `done` · `failed`. |
+| `ask.job_result(job_id uuid)` | `text` | The answer once `done`. |
+| `ask.job_error(job_id uuid)` | `text` | The error once `failed`. |
+| `ask.cancel_job(job_id uuid)` | `bool` | Cancel a pending job. |
+| `ask.prune_jobs(older_than text, batch_size int default 10000)` | `bigint` | Delete terminal jobs older than an interval. |
+
+**Sessions**
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `ask.create_session(label text default null)` | `uuid` | Start a multi-turn session. |
+| `ask.chat(session_id uuid, message text)` | `text` | Send a turn; context carries across turns. |
+| `ask.clear_session(session_id uuid)` | `bool` | Wipe a session's history. |
+
+**Config**
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `ask.config(key text, value text)` | `bool` | Set a config value (stored in `ask._config`). |
+| `ask.get_config(key text)` | `text` | Read a value; secrets are redacted. |
+
+**Memory** (v0.3, opt-in)
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `ask.remember(content text, namespace text default null, metadata jsonb default null)` | `uuid` | Store a memory. |
+| `ask.recall(query text, namespace text default null, limit int default 5)` | `setof` | Hybrid-search recall. |
+| `ask.forget(id uuid)` | `bool` | Delete one memory. |
+| `ask.list_memories(…)` / `ask.list_namespaces()` | `setof` | Browse stored memories. |
+
+**Events** (v0.5.8 outbox, opt-in — see [Reverse notifications](#reverse-notifications-event-outbox))
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `ask.emit(event text, payload jsonb default null, summary text default null)` | `uuid` | Publish an event to `ask._outbox` + `NOTIFY`. |
+| `ask.prune_events(older_than text, batch_size int default 10000)` | `bigint` | Delete processed events older than an interval. |
+
+**Tools & introspection**
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `ask.register_tool(name text, spec jsonb, body text)` | `bool` | Register a custom SQL-backed tool. |
+| `ask.unregister_tool(name text)` | `bool` | Remove a custom tool. |
+| `ask.list_tools()` | `setof (name, spec)` | List registered tools. |
+| `ask.status()` | `jsonb` | Self-describing capability handshake (secret-free). |
+| `ask.status_api_level()` | `int` | Numeric API level for orchestrators. |
+| `ask.version()` | `text` | Extension version string. |
+
 ### Multi-turn sessions
 
 ```sql
@@ -408,6 +475,49 @@ job whose worker dies mid-run is reclaimed from `running` back to
 `pending` once `started_at` exceeds the orphan timeout. `ask._jobs.owner`
 defaults to `current_user` and the table is row-level-security scoped, so
 callers see only their own jobs.
+
+### Reverse notifications (event outbox)
+
+Where `ask.ask()` is request/response, the **event outbox** is the
+reverse channel: it lets the database (or the agent, mid-run) push a
+durable, ordered event out to an external listener (ADR-0017, hardened in
+0.5.8). `ask.emit()` writes a row to `ask._outbox` **and** fires
+`NOTIFY pg_ask_events` in the same transaction — the row is the source of
+truth, the NOTIFY is just a low-latency wake-up, so nothing is lost if no
+listener is connected.
+
+It is **opt-in** via `pg_ask.events_enabled` (no worker or restart
+needed — unlike async jobs, this is a plain in-transaction write):
+
+```sql
+ALTER SYSTEM SET pg_ask.events_enabled = on;
+SELECT pg_reload_conf();
+
+-- Emit an event (e.g. from a trigger, a job, or the agent).
+SELECT ask.emit(
+  'order.flagged',
+  '{"order_id": 4711, "reason": "velocity"}'::jsonb,
+  'Order 4711 flagged for manual review'   -- optional human summary
+);
+```
+
+A consumer either `LISTEN pg_ask_events` for push delivery, or polls the
+outbox directly and stamps `processed_at` as it drains:
+
+```sql
+-- Drain pending events, oldest first (a partial index keeps this cheap).
+SELECT id, ts, event, payload, summary
+FROM   ask._outbox
+WHERE  processed_at IS NULL
+ORDER  BY ts
+LIMIT  100;
+```
+
+`ask._outbox_emit` is the single SECURITY DEFINER writer; it enforces
+event-name validation, payload-size limits, dedup, and rate limiting
+under a transaction-scoped advisory lock, so a misbehaving caller can't
+flood the channel. Use `ask.prune_events('30 days')` to trim delivered
+history.
 
 ### Long-term memory (v0.3, optional)
 
