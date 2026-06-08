@@ -410,3 +410,17 @@ AS 'MODULE_PATHNAME', 'prune_jobs_wrapper';
 -- the operator-only worker-path helpers, so it must not be PUBLIC.
 REVOKE ALL ON FUNCTION ask.prune_jobs(text, int) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask.run_pending_jobs() FROM PUBLIC;
+
+-- ── parallel-safety fix for pre-existing SPI-reading functions ──────────────
+-- status / list_tools / list_memories / list_namespaces were created
+-- PARALLEL SAFE in earlier versions, but they all read via SPI — which is
+-- forbidden inside a parallel worker ("cannot start commands during a
+-- parallel operation"). pgrx does NOT change a function's proparallel flag on
+-- ALTER EXTENSION UPDATE (only fresh-install base SQL reflects the new
+-- annotation), so an upgraded install keeps the wrong flag unless we fix it
+-- explicitly here. (job_status / job_result / job_error are new in 0.5.9 and
+-- are already created PARALLEL UNSAFE above.)
+ALTER FUNCTION ask.status() PARALLEL UNSAFE;
+ALTER FUNCTION ask.list_tools() PARALLEL UNSAFE;
+ALTER FUNCTION ask.list_memories(text, int, int) PARALLEL UNSAFE;
+ALTER FUNCTION ask.list_namespaces() PARALLEL UNSAFE;
