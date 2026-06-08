@@ -9,6 +9,83 @@ treats internal Rust modules as private regardless of `pub` visibility.
 Upgrade scripts ship as `sql/pg_ask--<from>--<to>.sql` and run
 automatically under `ALTER EXTENSION pg_ask UPDATE`.
 
+## [0.5.8] — 2026-06-08 — Event outbox production hardening (`ask.emit`)
+
+Production-hardens the ADR-0017 event outbox without touching its
+consumer-facing contract: the `pg_ask_events` channel, the `ask._outbox`
+columns, the pending-row query (`WHERE processed_at IS NULL ORDER BY ts`),
+and the `ask._outbox_emit(text,jsonb,text)` / `ask._outbox_mark_processed`
+/ `ask.emit` signatures are all unchanged, so an existing
+`LISTEN pg_ask_events` consumer keeps working across the upgrade. Upgrade
+with `ALTER EXTENSION pg_ask UPDATE TO '0.5.8';`.
+
+### Security
+
+- **Bypass closed (`ask._outbox_emit`)**: validation, the `events_enabled`
+  switch, and the `pg_notify` wake-up now ALL live inside the SECURITY
+  DEFINER `ask._outbox_emit`, which is the single authority for writing an
+  event. Previously these lived only in the Rust `ask.emit` wrapper, so a
+  role with `EXECUTE` on the (PUBLIC-granted) helper could call it directly
+  to write a newline-laced event name, a multi-megabyte payload, or a row
+  while events were globally disabled — and without firing a NOTIFY. The
+  Rust layer is now pure defense-in-depth.
+
+### Added
+
+- **Input validation on `ask.emit`**, owned solely by `ask._outbox_emit`
+  (the single authority — the Rust layer does no size/charset checks, so
+  there is nothing to drift): event names must be non-empty, `<= 127` chars,
+  and match `[A-Za-z0-9][A-Za-z0-9._:-]*` (rejects whitespace / control
+  chars that could corrupt the durable log or a listener's routing).
+  `summary` is capped at 8192 **bytes** (`octet_length`, exact for
+  multi-byte text). Payload size is capped by the new
+  `pg_ask.events_max_payload_bytes` GUC (default 64 KiB; `0` disables),
+  measured as serialized-JSON bytes. Violations raise
+  `invalid_parameter_value` *before* any row is written.
+- **Flood control** via two opt-in GUCs, both default `0` (off):
+  `pg_ask.events_max_per_minute` (per-`(emitter, event)` rate cap) and
+  `pg_ask.events_dedup_window_ms` (collapse identical
+  `(emitter, event, payload)` repeats, compared via `md5(payload::text)`).
+  Both are plain integers (e.g. `60000`), not unit-suffixed — the SQL writer
+  reads them via `current_setting()::int`.
+  A suppressed emit is a silent no-op returning `NULL` — it never raises,
+  so a trigger's transaction is never rolled back, and emits a
+  `RAISE DEBUG` line so operators can observe suppression under
+  `log_min_messages = debug1`. Checks run atomically inside
+  `ask._outbox_emit` under a transaction-scoped advisory lock to avoid a
+  check-then-insert race. The lock uses the two-argument
+  `pg_advisory_xact_lock(domain, key)` form (domain = `'pg_ask._outbox'`),
+  so it shares no key space with the int8 session lock and can never
+  collide across lock domains.
+- **Indexes** for the new hot paths: `_outbox_rate_idx (emitter, event, ts)`
+  so the rate-limit / dedup checks never full-scan the outbox on emit, and
+  the partial `_outbox_processed_idx (processed_at) WHERE processed_at IS
+  NOT NULL` so retention prunes hit an index instead of a seq scan.
+- **Retention**: `ask.prune_events('<interval>'[, batch_size])` (e.g.
+  `'30 days'`) plus the SECURITY DEFINER `ask._outbox_prune(interval, int)`
+  helper. Deletes only already-delivered rows (`processed_at IS NOT NULL`)
+  older than the interval, **in batches** (default 10000; `0` = single
+  DELETE) to bound each DELETE's per-statement memory, lock acquisition,
+  and dead-tuple churn. Note: as a plpgsql function the whole loop runs in
+  the caller's single transaction, so batching does NOT shorten lock
+  lifetime or split WAL across commits — for that, call it repeatedly from
+  separate transactions. Pending rows are never removed. Locked to
+  operators (not granted to PUBLIC).
+
+### Changed
+
+- `pg_notify` is fired inside `ask._outbox_emit` (was a separate Rust SPI
+  call) and is `pg_catalog`-qualified, so a hostile `search_path` cannot
+  shadow it and a direct helper call can't write a row without waking
+  listeners.
+- Dedup now compares `md5(payload::text)` instead of the `jsonb =` operator
+  — stable for logically-equal payloads (jsonb normalizes key order /
+  whitespace before the text cast) and far cheaper than an equality scan
+  over large jsonb values.
+- `ask.emit` doc-comments and SQL comments are now consumer-agnostic
+  ("an external `LISTEN pg_ask_events` consumer") rather than naming a
+  specific downstream; the orchestrator coupling lives only in ADR-0017.
+
 ## [0.5.7] — 2026-06-06 — Security hardening pass
 
 A security / code-review pass closing several ways a low-privilege role

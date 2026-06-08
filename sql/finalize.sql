@@ -26,3 +26,12 @@
 -- after CREATE EXTENSION.
 REVOKE ALL ON FUNCTION ask.config(text, text)     FROM PUBLIC;
 REVOKE ALL ON FUNCTION ask.get_config(text)       FROM PUBLIC;
+
+-- ---------------------------------------------------------------------------
+-- ask.prune_events(interval-text) deletes delivered outbox rows. It is a
+-- destructive maintenance operation, so — like the config surface — it is
+-- locked to operators rather than left at pgrx's default EXECUTE TO PUBLIC.
+-- Grant it explicitly to whatever role runs your retention job:
+--   GRANT EXECUTE ON FUNCTION ask.prune_events(text, int) TO maintenance_role;
+-- ---------------------------------------------------------------------------
+REVOKE ALL ON FUNCTION ask.prune_events(text, int) FROM PUBLIC;
