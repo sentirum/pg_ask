@@ -9,6 +9,58 @@ treats internal Rust modules as private regardless of `pub` visibility.
 Upgrade scripts ship as `sql/pg_ask--<from>--<to>.sql` and run
 automatically under `ALTER EXTENSION pg_ask UPDATE`.
 
+## [0.5.9] — 2026-06-08 — Async job queue (`ask.ask_async`)
+
+Adds an asynchronous job queue (ADR-0018) so a question can be submitted
+without blocking the calling backend on the LLM round-trip. `ask.ask_async()`
+enqueues a row to `ask._jobs` and returns a job id immediately; a background
+worker runs the agent loop in its own backend and writes the answer back.
+Upgrade with `ALTER EXTENSION pg_ask UPDATE TO '0.5.9';`.
+
+This is the only correct shape for async work in PostgreSQL: a backend is
+single-threaded and SPI is not thread-safe, so "async" means handing the
+work to a separate process (a background worker), never running it off-thread
+in the caller. The synchronous `ask.ask()` path is unchanged.
+
+### Added
+
+- **`ask.ask_async(question[, kind])` → uuid**: enqueue a job and return its
+  id immediately (NULL when `pg_ask.jobs_enabled = off`, the default).
+  `kind` is `'ask'` (full agent loop) or `'sql'` (generate-only).
+- **Result accessors** (owner-scoped, NotFound == Unauthorized collapse):
+  `ask.job_status(id)`, `ask.job_result(id)`, `ask.job_error(id)`,
+  `ask.cancel_job(id)`.
+- **`ask.run_pending_jobs()`**: synchronous drain of up to
+  `pg_ask.jobs_batch` jobs in the current database, for installs without the
+  background worker (e.g. driven by `pg_cron`). Recovers orphans first.
+- **`ask.prune_jobs('<interval>'[, batch])`**: batched retention of terminal
+  jobs; operator-only.
+- **Background workers** (when loaded via `shared_preload_libraries`): a
+  launcher process discovers every pg_ask-enabled database and spawns one
+  dynamic per-database worker, which drains `ask._jobs` on a poll interval.
+  Re-reconciles so a `CREATE EXTENSION pg_ask` in a new database gets a
+  worker without a restart.
+- **Durable state machine** (`ask._jobs.status`): pending → running →
+  done/failed, with retry (`pg_ask.jobs_max_attempts`) on transient failure
+  and orphan recovery (`pg_ask.jobs_orphan_timeout_ms`) so a crashed
+  worker's in-flight job is re-queued, never lost. Claims use
+  `FOR UPDATE SKIP LOCKED` so concurrent workers never collide.
+- **GUCs**: `jobs_enabled` (off), `jobs_max_attempts` (3),
+  `jobs_orphan_timeout_ms` (300000), `jobs_batch` (10),
+  `jobs_poll_interval_ms` (5000).
+
+### Notes
+
+- A background worker cannot `LISTEN` (PostgreSQL restricts it to regular
+  client backends), so workers are poll-driven; the enqueue path still fires
+  `pg_notify('pg_ask_jobs', id)` for any external listener.
+- Enable the worker by adding `pg_ask` to `shared_preload_libraries` and
+  setting `pg_ask.jobs_enabled = on`. Without the preload, async still works
+  via `ask.run_pending_jobs()`.
+- The launcher's per-database worker is the clean-architecture seam:
+  claim/run/complete lives once in `src/jobs`, reused by both the worker and
+  the synchronous drain.
+
 ## [0.5.8] — 2026-06-08 — Event outbox production hardening (`ask.emit`)
 
 Production-hardens the ADR-0017 event outbox without touching its

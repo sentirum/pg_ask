@@ -54,6 +54,7 @@ mod api;
 mod bgworker;
 mod embeddings;
 mod infra;
+mod jobs;
 mod memory;
 mod planner;
 mod providers;
@@ -239,6 +240,56 @@ pub extern "C-unwind" fn _PG_init() {
         &EVENTS_DEDUP_WINDOW_MS,
         0,
         86_400_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_bool_guc(
+        c"pg_ask.jobs_enabled",
+        c"Enable ask.ask_async(): enqueue jobs to ask._jobs for a worker to run",
+        c"",
+        &JOBS_ENABLED,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_ask.jobs_max_attempts",
+        c"Times a failed async job is retried before it is marked failed",
+        c"A transient failure returns the job to pending; once attempts reach \
+          this it is terminal. Minimum 1 (no retry).",
+        &JOBS_MAX_ATTEMPTS,
+        1,
+        100,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_ask.jobs_orphan_timeout_ms",
+        c"A running job older than this (ms) is reclaimed to pending (worker died)",
+        c"Must exceed the worst-case agent-loop runtime. Plain integer ms; the \
+          SQL recovery helper reads it via current_setting()::int.",
+        &JOBS_ORPHAN_TIMEOUT_MS,
+        1_000,
+        86_400_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_ask.jobs_batch",
+        c"Max jobs processed per ask.run_pending_jobs() / worker drain pass",
+        c"",
+        &JOBS_BATCH,
+        1,
+        10_000,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_ask.jobs_poll_interval_ms",
+        c"Background worker queue-poll interval in ms (safety net vs missed NOTIFY)",
+        c"Plain integer ms.",
+        &JOBS_POLL_INTERVAL_MS,
+        100,
+        3_600_000,
         GucContext::Userset,
         GucFlags::default(),
     );
@@ -699,6 +750,237 @@ mod tests {
         );
         let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._outbox").unwrap();
         assert_eq!(n, Some(1));
+    }
+
+    // ===================== Async job queue (v0.5.9) =====================
+
+    #[pg_test]
+    fn ask_async_is_noop_when_jobs_disabled() {
+        Spi::run("SET pg_ask.jobs_enabled = off").unwrap();
+        let id: Option<pgrx::Uuid> = Spi::get_one("SELECT ask.ask_async('anything')").unwrap();
+        assert!(id.is_none(), "ask_async returns NULL when disabled");
+        let n: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._jobs").unwrap();
+        assert_eq!(n, Some(0), "no job row when disabled");
+    }
+
+    #[pg_test]
+    fn ask_async_enqueues_pending_job() {
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let id: Option<pgrx::Uuid> =
+            Spi::get_one("SELECT ask.ask_async('count rows', 'sql')").unwrap();
+        assert!(id.is_some(), "ask_async returns a job id when enabled");
+        let status: Option<String> =
+            Spi::get_one("SELECT status FROM ask._jobs ORDER BY ts DESC LIMIT 1").unwrap();
+        assert_eq!(status.as_deref(), Some("pending"));
+        let kind: Option<String> =
+            Spi::get_one("SELECT kind FROM ask._jobs ORDER BY ts DESC LIMIT 1").unwrap();
+        assert_eq!(kind.as_deref(), Some("sql"));
+    }
+
+    #[pg_test]
+    fn ask_async_rejects_bad_kind() {
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let res = std::panic::catch_unwind(|| {
+            Spi::get_one::<pgrx::Uuid>("SELECT ask.ask_async('q', 'bogus')")
+        });
+        assert!(res.is_err(), "unknown kind must raise");
+    }
+
+    #[pg_test]
+    fn job_claim_is_atomic_and_fifo() {
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let first: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('first', 'sql')")
+            .unwrap()
+            .unwrap();
+        let _second: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('second', 'sql')")
+            .unwrap()
+            .unwrap();
+        // Claim once → oldest (first) flips to running.
+        let claimed: Option<pgrx::Uuid> = Spi::get_one("SELECT id FROM ask._job_claim()").unwrap();
+        assert_eq!(claimed, Some(first), "claim returns the oldest pending job");
+        let st: Option<String> = Spi::get_one_with_args(
+            "SELECT status FROM ask._jobs WHERE id = $1",
+            &[first.into()],
+        )
+        .unwrap();
+        assert_eq!(st.as_deref(), Some("running"));
+        // attempts bumped to 1, started_at + worker_pid stamped.
+        let attempts: Option<i32> = Spi::get_one_with_args(
+            "SELECT attempts FROM ask._jobs WHERE id = $1",
+            &[first.into()],
+        )
+        .unwrap();
+        assert_eq!(attempts, Some(1));
+    }
+
+    #[pg_test]
+    fn job_complete_only_acts_on_running() {
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
+            .unwrap()
+            .unwrap();
+        // Complete a PENDING (not yet claimed) job → no-op (false).
+        let ok: Option<bool> =
+            Spi::get_one_with_args("SELECT ask._job_complete($1, 'ans', 0, 0)", &[id.into()])
+                .unwrap();
+        assert_eq!(ok, Some(false), "complete refuses a non-running row");
+        // Claim then complete → succeeds.
+        Spi::run("SELECT id FROM ask._job_claim()").unwrap();
+        let ok2: Option<bool> = Spi::get_one_with_args(
+            "SELECT ask._job_complete($1, 'the answer', 12, 34)",
+            &[id.into()],
+        )
+        .unwrap();
+        assert_eq!(ok2, Some(true));
+        let st: Option<String> =
+            Spi::get_one_with_args("SELECT status FROM ask._jobs WHERE id=$1", &[id.into()])
+                .unwrap();
+        assert_eq!(st.as_deref(), Some("done"));
+    }
+
+    #[pg_test]
+    fn job_fail_retries_then_terminal() {
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
+            .unwrap()
+            .unwrap();
+        // max_attempts = 2: first claim+fail → back to pending (retry).
+        Spi::run("SELECT id FROM ask._job_claim()").unwrap();
+        let s1: Option<String> =
+            Spi::get_one_with_args("SELECT ask._job_fail($1, 'boom', 2)", &[id.into()]).unwrap();
+        assert_eq!(s1.as_deref(), Some("pending"), "first failure retries");
+        // second claim+fail → terminal failed (attempts now 2 >= 2).
+        Spi::run("SELECT id FROM ask._job_claim()").unwrap();
+        let s2: Option<String> =
+            Spi::get_one_with_args("SELECT ask._job_fail($1, 'boom again', 2)", &[id.into()])
+                .unwrap();
+        assert_eq!(s2.as_deref(), Some("failed"), "second failure is terminal");
+        let err: Option<String> =
+            Spi::get_one_with_args("SELECT error FROM ask._jobs WHERE id=$1", &[id.into()])
+                .unwrap();
+        assert_eq!(err.as_deref(), Some("boom again"));
+    }
+
+    #[pg_test]
+    fn job_recover_orphans_revives_stale_running() {
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
+            .unwrap()
+            .unwrap();
+        Spi::run("SELECT id FROM ask._job_claim()").unwrap();
+        // Backdate started_at so it looks orphaned.
+        Spi::run_with_args(
+            "UPDATE ask._jobs SET started_at = now() - interval '1 hour' WHERE id = $1",
+            &[id.into()],
+        )
+        .unwrap();
+        // Recover with a 60s timeout → the 1h-old running job is revived.
+        let n: Option<i64> = Spi::get_one("SELECT ask._job_recover_orphans(60000)").unwrap();
+        assert_eq!(n, Some(1), "one orphan recovered");
+        let st: Option<String> =
+            Spi::get_one_with_args("SELECT status FROM ask._jobs WHERE id=$1", &[id.into()])
+                .unwrap();
+        assert_eq!(st.as_deref(), Some("pending"), "orphan back to pending");
+    }
+
+    #[pg_test]
+    fn job_cancel_blocks_completion() {
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
+            .unwrap()
+            .unwrap();
+        Spi::run("SELECT id FROM ask._job_claim()").unwrap();
+        // Cancel the running job.
+        let cancelled: Option<bool> =
+            Spi::get_one_with_args("SELECT ask.cancel_job($1)", &[id.into()]).unwrap();
+        assert_eq!(cancelled, Some(true));
+        // A late completion must NOT resurrect a cancelled job.
+        let ok: Option<bool> = Spi::get_one_with_args(
+            "SELECT ask._job_complete($1, 'too late', 0, 0)",
+            &[id.into()],
+        )
+        .unwrap();
+        assert_eq!(ok, Some(false), "cancelled job can't be completed");
+        let st: Option<String> =
+            Spi::get_one_with_args("SELECT status FROM ask._jobs WHERE id=$1", &[id.into()])
+                .unwrap();
+        assert_eq!(st.as_deref(), Some("cancelled"));
+    }
+
+    #[pg_test]
+    fn run_pending_jobs_executes_end_to_end() {
+        // Full async path against the fixture provider: enqueue a 'sql'
+        // job, drain it synchronously, and assert the answer landed.
+        use_fixture("sql_only");
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('count rows', 'sql')")
+            .unwrap()
+            .unwrap();
+        let processed: Option<i64> = Spi::get_one("SELECT ask.run_pending_jobs()").unwrap();
+        assert_eq!(processed, Some(1), "one job processed");
+        let st: Option<String> =
+            Spi::get_one_with_args("SELECT ask.job_status($1)", &[id.into()]).unwrap();
+        assert_eq!(st.as_deref(), Some("done"));
+        let ans: Option<String> =
+            Spi::get_one_with_args("SELECT ask.job_result($1)", &[id.into()]).unwrap();
+        assert_eq!(
+            ans.as_deref(),
+            Some("SELECT count(*) FROM pg_class"),
+            "job answer matches the fixture's final text"
+        );
+    }
+
+    #[pg_test]
+    fn job_accessors_return_null_not_error_when_absent() {
+        // Regression: job_status/result/error use a scalar subquery so an
+        // unknown id (or another owner's job) yields a clean NULL, not a
+        // "SpiTupleTable positioned before the start" error. This is the
+        // NotFound == Unauthorized collapse the rest of pg_ask relies on.
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        let bogus = "00000000-0000-0000-0000-000000000000";
+        let st: Option<String> =
+            Spi::get_one(&format!("SELECT ask.job_status('{bogus}'::uuid)")).unwrap();
+        assert!(st.is_none(), "unknown job_status is NULL, not an error");
+        let ans: Option<String> =
+            Spi::get_one(&format!("SELECT ask.job_result('{bogus}'::uuid)")).unwrap();
+        assert!(ans.is_none(), "unknown job_result is NULL");
+        let err: Option<String> =
+            Spi::get_one(&format!("SELECT ask.job_error('{bogus}'::uuid)")).unwrap();
+        assert!(err.is_none(), "unknown job_error is NULL");
+        // A pending (not-done) job: status set, but result/error still NULL.
+        let id: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('q', 'sql')")
+            .unwrap()
+            .unwrap();
+        let st2: Option<String> =
+            Spi::get_one_with_args("SELECT ask.job_status($1)", &[id.into()]).unwrap();
+        assert_eq!(st2.as_deref(), Some("pending"));
+        let ans2: Option<String> =
+            Spi::get_one_with_args("SELECT ask.job_result($1)", &[id.into()]).unwrap();
+        assert!(ans2.is_none(), "pending job has no result yet");
+    }
+
+    #[pg_test]
+    fn prune_jobs_removes_only_terminal() {
+        Spi::run("SET pg_ask.jobs_enabled = on").unwrap();
+        // One done+aged, one pending.
+        let done: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('a', 'sql')")
+            .unwrap()
+            .unwrap();
+        let _pending: pgrx::Uuid = Spi::get_one("SELECT ask.ask_async('b', 'sql')")
+            .unwrap()
+            .unwrap();
+        Spi::run("SELECT id FROM ask._job_claim()").unwrap(); // claims 'done' (oldest)
+        Spi::get_one_with_args::<bool>("SELECT ask._job_complete($1, 'x', 0, 0)", &[done.into()])
+            .unwrap();
+        Spi::run_with_args(
+            "UPDATE ask._jobs SET finished_at = now() - interval '10 days' WHERE id = $1",
+            &[done.into()],
+        )
+        .unwrap();
+        let removed: Option<i64> = Spi::get_one("SELECT ask.prune_jobs('7 days')").unwrap();
+        assert_eq!(removed, Some(1), "only the terminal+aged job is pruned");
+        let remaining: Option<i64> = Spi::get_one("SELECT count(*) FROM ask._jobs").unwrap();
+        assert_eq!(remaining, Some(1), "pending job survives");
     }
 
     /// Configure every fixture-driven test the same way: pick the
